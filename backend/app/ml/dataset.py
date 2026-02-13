@@ -8,6 +8,7 @@ from pathlib import Path
 import numpy as np
 import structlog
 import torch
+from scipy import interpolate as scipy_interpolate
 from torch.utils.data import Dataset
 
 logger = structlog.get_logger(__name__)
@@ -19,6 +20,41 @@ class SignSample:
 
     landmarks: np.ndarray
     label: int
+
+
+def temporal_resample(sequence: np.ndarray, target_len: int = 64) -> np.ndarray:
+    """
+    Resample a variable-length sequence to a fixed number of frames.
+
+    Uses linear interpolation to uniformly sample the temporal axis.
+    Preserves first and last frames exactly.
+
+    Args:
+        sequence: Array of shape [num_frames, num_features]
+        target_len: Desired output length (default: 64)
+
+    Returns:
+        Array of shape [target_len, num_features]
+    """
+    num_frames = sequence.shape[0]
+
+    if num_frames == target_len:
+        return sequence.copy()
+
+    if num_frames == 1:
+        return np.tile(sequence, (target_len, 1))
+
+    original_indices = np.linspace(0, 1, num_frames)
+    target_indices = np.linspace(0, 1, target_len)
+
+    resampled = np.zeros((target_len, sequence.shape[1]), dtype=sequence.dtype)
+    for feat_idx in range(sequence.shape[1]):
+        interp_fn = scipy_interpolate.interp1d(
+            original_indices, sequence[:, feat_idx], kind="linear"
+        )
+        resampled[:, feat_idx] = interp_fn(target_indices)
+
+    return resampled
 
 
 class LandmarkDataset(Dataset):
