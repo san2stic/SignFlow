@@ -34,7 +34,9 @@ export function TrainPage(): JSX.Element {
     addToRecentSigns,
     suggestions,
     applySuggestions,
-    clearSuggestions
+    clearSuggestions,
+    isLoading,
+    error,
   } = useLabelingStore();
   const [selectedSignForLabeling, setSelectedSignForLabeling] = useState<string | null>(null);
 
@@ -62,11 +64,38 @@ export function TrainPage(): JSX.Element {
           <TrainingWizard videoRef={videoRef} cameraRef={attachVideoRef} initialAssignedSign={initialAssignedSign} />
         )}
         {activeTab === "label" && (
-          <VideoGrid
-            videos={unlabeledVideos}
-            selectedVideo={selectedVideo}
-            onSelectVideo={selectVideo}
-          />
+          <>
+            {isLoading && unlabeledVideos.length === 0 && (
+              <div className="flex items-center justify-center min-h-[400px]">
+                <div className="text-center">
+                  <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-primary mx-auto mb-4"></div>
+                  <p className="text-slate-400">Loading videos...</p>
+                </div>
+              </div>
+            )}
+
+            {error && (
+              <div className="p-4 bg-red-900/20 border border-red-500/30 rounded text-red-300 mb-4">
+                <p className="font-semibold mb-1">Error loading videos</p>
+                <p className="text-sm">{error}</p>
+                <button
+                  onClick={() => loadUnlabeledVideos()}
+                  className="mt-2 text-sm underline hover:no-underline"
+                >
+                  Try again
+                </button>
+              </div>
+            )}
+
+            {!isLoading && !error && (
+              <VideoGrid
+                videos={unlabeledVideos}
+                selectedVideo={selectedVideo}
+                onSelectVideo={selectVideo}
+                isRefreshing={isLoading && unlabeledVideos.length > 0}
+              />
+            )}
+          </>
         )}
       </div>
 

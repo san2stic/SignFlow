@@ -19,21 +19,25 @@ export function SignSelector({
   const [searchResults, setSearchResults] = useState<Sign[]>([]);
   const [isSearching, setIsSearching] = useState(false);
   const [showCreateForm, setShowCreateForm] = useState(false);
+  const [searchError, setSearchError] = useState<string | null>(null);
 
   useEffect(() => {
     const search = async () => {
       if (searchQuery.trim().length < 2) {
         setSearchResults([]);
+        setSearchError(null);
         return;
       }
 
       setIsSearching(true);
+      setSearchError(null);
       try {
         const response = await listSigns(searchQuery.trim());
         setSearchResults(response.items);
       } catch (error) {
         console.error("Search failed:", error);
         setSearchResults([]);
+        setSearchError("Failed to search signs. Please try again.");
       } finally {
         setIsSearching(false);
       }
@@ -81,6 +85,13 @@ export function SignSelector({
             onSignCreated={handleSignCreated}
             onCancel={() => setShowCreateForm(false)}
           />
+        </div>
+      )}
+
+      {/* Error message */}
+      {searchError && (
+        <div className="p-3 bg-red-900/20 border border-red-500/30 rounded text-red-300 text-sm">
+          {searchError}
         </div>
       )}
 

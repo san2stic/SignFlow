@@ -13,6 +13,8 @@ export function SuggestionView({ suggestions, signName, onApply, onSkip }: Sugge
   const [selectedVideoIds, setSelectedVideoIds] = useState<Set<string>>(
     new Set(suggestions.map((v) => v.id))
   );
+  const [isApplying, setIsApplying] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   const handleToggleSelect = (videoId: string) => {
     setSelectedVideoIds((prev) => {
@@ -26,9 +28,16 @@ export function SuggestionView({ suggestions, signName, onApply, onSkip }: Sugge
     });
   };
 
-  const handleApply = () => {
-    if (selectedVideoIds.size > 0) {
-      onApply(Array.from(selectedVideoIds));
+  const handleApply = async () => {
+    if (selectedVideoIds.size === 0) return;
+    setIsApplying(true);
+    setError(null);
+    try {
+      await onApply(Array.from(selectedVideoIds));
+    } catch (err) {
+      console.error("Failed to apply suggestions:", err);
+      setError("Failed to apply labels. Please try again.");
+      setIsApplying(false);
     }
   };
 
@@ -60,6 +69,13 @@ export function SuggestionView({ suggestions, signName, onApply, onSkip }: Sugge
           </div>
         </div>
 
+        {/* Error message */}
+        {error && (
+          <div className="mx-6 mb-4 p-3 bg-red-900/20 border border-red-500/30 rounded text-red-300 text-sm">
+            {error}
+          </div>
+        )}
+
         {/* Footer */}
         <div className="flex items-center justify-between p-6 border-t border-slate-700">
           <div className="text-sm text-slate-400">
@@ -69,15 +85,16 @@ export function SuggestionView({ suggestions, signName, onApply, onSkip }: Sugge
             <button
               onClick={onSkip}
               className="px-4 py-2 text-sm font-medium text-slate-300 hover:text-slate-100 transition-colors"
+              disabled={isApplying}
             >
               Skip
             </button>
             <button
               onClick={handleApply}
-              disabled={selectedVideoIds.size === 0}
+              disabled={selectedVideoIds.size === 0 || isApplying}
               className="px-4 py-2 text-sm font-medium bg-primary text-white rounded hover:bg-primary/90 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
             >
-              Apply Labels ({selectedVideoIds.size})
+              {isApplying ? "Applying..." : `Apply Labels (${selectedVideoIds.size})`}
             </button>
           </div>
         </div>

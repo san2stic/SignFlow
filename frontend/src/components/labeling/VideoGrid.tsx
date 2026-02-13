@@ -6,11 +6,17 @@ interface VideoGridProps {
   videos: UnlabeledVideo[];
   selectedVideo: UnlabeledVideo | null;
   onSelectVideo: (video: UnlabeledVideo) => void;
+  isRefreshing?: boolean;
 }
 
 type SortOption = "date-desc" | "date-asc" | "duration-desc" | "duration-asc";
 
-export function VideoGrid({ videos, selectedVideo, onSelectVideo }: VideoGridProps): JSX.Element {
+export function VideoGrid({
+  videos,
+  selectedVideo,
+  onSelectVideo,
+  isRefreshing = false,
+}: VideoGridProps): JSX.Element {
   const [sortBy, setSortBy] = useState<SortOption>("date-desc");
 
   const sortedVideos = useMemo(() => {
@@ -41,7 +47,17 @@ export function VideoGrid({ videos, selectedVideo, onSelectVideo }: VideoGridPro
   }
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-4 relative">
+      {/* Loading overlay */}
+      {isRefreshing && (
+        <div className="absolute inset-0 bg-slate-900/50 backdrop-blur-sm z-10 flex items-center justify-center rounded-lg">
+          <div className="text-center">
+            <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary mx-auto mb-2"></div>
+            <p className="text-sm text-slate-400">Refreshing...</p>
+          </div>
+        </div>
+      )}
+
       {/* Header with sorting */}
       <div className="flex items-center justify-between">
         <h2 className="text-lg font-semibold text-slate-200">

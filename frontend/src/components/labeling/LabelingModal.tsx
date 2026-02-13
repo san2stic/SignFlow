@@ -20,12 +20,14 @@ export function LabelingModal({
   children,
 }: LabelingModalProps): JSX.Element | null {
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
 
   useEffect(() => {
     if (!video) return;
     onSignSelect(null);
     setIsSubmitting(false);
+    setError(null);
   }, [video, onSignSelect]);
 
   useEffect(() => {
@@ -41,11 +43,13 @@ export function LabelingModal({
   const handleSubmit = async () => {
     if (!selectedSignId) return;
     setIsSubmitting(true);
+    setError(null);
     try {
       await onLabel(video.id, selectedSignId);
       onClose();
-    } catch (error) {
-      console.error("Failed to label video:", error);
+    } catch (err) {
+      console.error("Failed to label video:", err);
+      setError(err instanceof Error ? err.message : "Failed to label video. Please try again.");
       setIsSubmitting(false);
     }
   };
@@ -107,6 +111,13 @@ export function LabelingModal({
             {children}
           </div>
         </div>
+
+        {/* Error message */}
+        {error && (
+          <div className="mx-6 mb-4 p-3 bg-red-900/20 border border-red-500/30 rounded text-red-300 text-sm">
+            {error}
+          </div>
+        )}
 
         {/* Footer */}
         <div className="flex items-center justify-end gap-3 p-4 border-t border-slate-700">

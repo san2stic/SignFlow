@@ -18,10 +18,11 @@ export function ClipPreview({ url, durationMs, quality, qualityReasons, onRemove
   const [frame, setFrame] = useState<LandmarkFrame | null>(null);
 
   // Activer MediaPipe uniquement quand la vidéo est en lecture
-  const { frame: detectedFrame } = useMediaPipe(isPlaying, {
+  const { frame: detectedFrame } = useMediaPipe({
     videoRef,
+    enabled: isPlaying,
     modelComplexity: 0, // Mode lite pour performances
-    targetFPS: 30
+    targetFps: 30
   });
 
   // Mettre à jour le frame détecté
