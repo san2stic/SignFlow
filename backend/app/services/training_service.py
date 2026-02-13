@@ -398,7 +398,7 @@ class TrainingService:
                         num_classes=num_classes,
                         d_model=128,
                         device=device,
-                        freeze_until_layer=1,
+                        freeze_until_layer=int(config.get("freeze_until_layer", 2)),
                     )
                     model = prepared.model
                     num_classes = model.num_classes
@@ -428,6 +428,18 @@ class TrainingService:
                     mixup_alpha=float(config.get("mixup_alpha", 0.3)),
                     use_ema=bool(config.get("use_ema", True)),
                     ema_decay=float(config.get("ema_decay", 0.995)),
+                    gradient_accumulation_steps=int(config.get("gradient_accumulation_steps", 1)),
+                    temporal_mask_prob=float(config.get("temporal_mask_prob", 0.15)),
+                    temporal_mask_span_ratio=float(config.get("temporal_mask_span_ratio", 0.2)),
+                    use_amp=bool(config.get("use_amp", True)),
+                    amp_dtype=str(config.get("amp_dtype", "float16")),
+                    use_swa=bool(config.get("use_swa", True)),
+                    swa_start_ratio=float(config.get("swa_start_ratio", 0.75)),
+                    swa_lr=(
+                        float(config["swa_lr"])
+                        if config.get("swa_lr") not in (None, "")
+                        else None
+                    ),
                 )
 
                 # Progress callback

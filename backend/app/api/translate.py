@@ -86,6 +86,7 @@ def get_or_create_pipeline() -> SignFlowInferencePipeline:
         return _global_pipeline
 
     logger.info("initializing_global_pipeline")
+    settings = get_settings()
 
     # Get active model from database
     db = SessionLocal()
@@ -105,8 +106,11 @@ def get_or_create_pipeline() -> SignFlowInferencePipeline:
             )
             pipeline = SignFlowInferencePipeline(
                 model_path=active_model.file_path,
-                seq_len=30,
-                confidence_threshold=0.7,
+                seq_len=settings.translate_seq_len,
+                confidence_threshold=settings.translate_confidence_threshold,
+                inference_num_views=settings.translate_inference_num_views,
+                inference_temperature=settings.translate_inference_temperature,
+                max_view_disagreement=settings.translate_max_view_disagreement,
                 device="cpu",
             )
             pipeline.set_labels(labels)
@@ -117,8 +121,11 @@ def get_or_create_pipeline() -> SignFlowInferencePipeline:
             # Create pipeline without model (will return NONE predictions)
             pipeline = SignFlowInferencePipeline(
                 model_path=None,
-                seq_len=30,
-                confidence_threshold=0.7,
+                seq_len=settings.translate_seq_len,
+                confidence_threshold=settings.translate_confidence_threshold,
+                inference_num_views=settings.translate_inference_num_views,
+                inference_temperature=settings.translate_inference_temperature,
+                max_view_disagreement=settings.translate_max_view_disagreement,
             )
             pipeline.set_labels(labels)
 
@@ -128,7 +135,14 @@ def get_or_create_pipeline() -> SignFlowInferencePipeline:
     except Exception as e:
         logger.error("failed_to_initialize_pipeline", error=str(e), exc_info=True)
         # Fallback: create pipeline without model
-        pipeline = SignFlowInferencePipeline(model_path=None, seq_len=30, confidence_threshold=0.7)
+        pipeline = SignFlowInferencePipeline(
+            model_path=None,
+            seq_len=settings.translate_seq_len,
+            confidence_threshold=settings.translate_confidence_threshold,
+            inference_num_views=settings.translate_inference_num_views,
+            inference_temperature=settings.translate_inference_temperature,
+            max_view_disagreement=settings.translate_max_view_disagreement,
+        )
         try:
             labels = [item.slug for item in db.scalars(select(Sign).order_by(Sign.name.asc())).all()]
             pipeline.set_labels(labels)

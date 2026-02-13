@@ -1,7 +1,17 @@
-const API_URL = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
+const RAW_API_URL = (import.meta.env.VITE_API_URL as string | undefined)?.trim();
+
+function trimTrailingSlashes(value: string): string {
+  return value.replace(/\/+$/, "");
+}
+
+function normalizePath(path: string): string {
+  return path.startsWith("/") ? path : `/${path}`;
+}
+
+const API_URL = RAW_API_URL ? trimTrailingSlashes(RAW_API_URL) : "";
 
 export async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(`${API_URL}/api/v1${path}`, {
+  const response = await fetch(`${API_URL}/api/v1${normalizePath(path)}`, {
     ...init,
     headers: {
       "Content-Type": "application/json",

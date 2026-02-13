@@ -43,6 +43,13 @@ docker compose up --build
 - Frontend: `http://localhost:3000`
 - Backend: `http://localhost:8000`
 - Swagger: `http://localhost:8000/docs`
+- Le frontend appelle l'API via `/api/v1/*` (proxy Vite en dev), donc pas besoin de config `VITE_API_URL`/`VITE_WS_URL` par défaut.
+
+### Déploiement VPS (frontend servi sur IP/domaine)
+
+- Éviter toute URL frontend en `localhost:8000` (REST et WS).
+- Servir frontend et API sous la même origine (ex: Caddy/Nginx proxy `/api/*` vers backend).
+- En mode dev distant (`:3000`), utiliser le proxy Vite vers backend (`VITE_DEV_PROXY_TARGET`).
 
 ## Démarrage production-like (Caddy)
 

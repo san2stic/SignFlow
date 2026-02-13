@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 
 import torch
+import torch.nn.functional as F
 from torch import Tensor, nn
 
 from app.ml.feature_engineering import ENRICHED_FEATURE_DIM
@@ -44,6 +45,8 @@ class SignTransformer(nn.Module):
         feature_dropout: float = 0.2, # was 0.1
         pooling_dropout: float = 0.3, # was 0.1
         use_cls_token: bool = True,
+        token_dropout: float = 0.05,
+        temporal_smoothing: float = 0.15,
     ) -> None:
         super().__init__()
         # Store architecture parameters
@@ -53,6 +56,8 @@ class SignTransformer(nn.Module):
         self.nhead = nhead
         self.num_layers = num_layers
         self.use_cls_token = use_cls_token
+        self.token_dropout = max(0.0, min(0.5, float(token_dropout)))
+        self.temporal_smoothing = max(0.0, min(1.0, float(temporal_smoothing)))
 
         self.input_norm = nn.LayerNorm(num_features)
         self.embedding = nn.Sequential(
@@ -100,6 +105,7 @@ class SignTransformer(nn.Module):
 
         encoded = self.input_norm(raw_input)
         encoded = self.embedding(encoded)
+        encoded = self._apply_token_dropout(encoded, active_mask)
 
         if self.use_cls_token:
             batch_size = encoded.size(0)
@@ -107,6 +113,7 @@ class SignTransformer(nn.Module):
             encoded = torch.cat([cls_token, encoded], dim=1)
 
         encoded = self.positional_encoding(encoded)
+        encoded = self._apply_temporal_smoothing(encoded)
         key_padding_mask = self._build_key_padding_mask(active_mask, device=encoded.device)
         encoded = self.encoder(encoded, src_key_padding_mask=key_padding_mask)
         encoded = self.output_norm(encoded)
@@ -124,6 +131,49 @@ class SignTransformer(nn.Module):
         )
         fused = fusion_weight * cls_representation + (1.0 - fusion_weight) * mean_representation
         return self.pooling_dropout(fused)
+
+    def _apply_token_dropout(self, encoded: Tensor, active_mask: Tensor) -> Tensor:
+        """Randomly drop active temporal tokens during training for robustness."""
+        if not self.training or self.token_dropout <= 0.0:
+            return encoded
+        if encoded.ndim != 3 or active_mask.ndim != 2:
+            return encoded
+
+        drop_prob = self.token_dropout
+        random_mask = torch.rand(
+            (encoded.size(0), encoded.size(1)),
+            device=encoded.device,
+        ) < drop_prob
+        drop_mask = random_mask & active_mask
+        if not torch.any(drop_mask):
+            return encoded
+
+        return encoded.masked_fill(drop_mask.unsqueeze(-1), 0.0)
+
+    def _apply_temporal_smoothing(self, encoded: Tensor) -> Tensor:
+        """Inject local temporal smoothing before attention for motion continuity."""
+        if self.temporal_smoothing <= 0.0 or encoded.ndim != 3 or encoded.size(1) < 3:
+            return encoded
+
+        if self.use_cls_token:
+            cls_token = encoded[:, :1]
+            sequence = encoded[:, 1:]
+            smoothed = F.avg_pool1d(
+                sequence.transpose(1, 2),
+                kernel_size=3,
+                stride=1,
+                padding=1,
+            ).transpose(1, 2)
+            mixed = (1.0 - self.temporal_smoothing) * sequence + self.temporal_smoothing * smoothed
+            return torch.cat([cls_token, mixed], dim=1)
+
+        smoothed = F.avg_pool1d(
+            encoded.transpose(1, 2),
+            kernel_size=3,
+            stride=1,
+            padding=1,
+        ).transpose(1, 2)
+        return (1.0 - self.temporal_smoothing) * encoded + self.temporal_smoothing * smoothed
 
     def _build_key_padding_mask(self, active_mask: Tensor, device: torch.device) -> Tensor:
         """

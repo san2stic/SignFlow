@@ -57,6 +57,9 @@ class SignFlowInferencePipeline:
         min_recording_frames: int = 15,
         pre_roll_frames: int = 4,
         frontend_confidence_floor: float = 0.35,
+        inference_num_views: int = 1,
+        inference_temperature: float = 1.0,
+        max_view_disagreement: float = 0.35,
     ) -> None:
         """
         Initialize inference pipeline.
@@ -76,6 +79,9 @@ class SignFlowInferencePipeline:
             min_recording_frames: Minimum frames recorded before allowing sign end.
             pre_roll_frames: Number of frames to keep before motion onset.
             frontend_confidence_floor: Confidence floor for frontend landmarks quality.
+            inference_num_views: Number of temporal views for test-time ensembling.
+            inference_temperature: Softmax temperature used for calibrated probabilities.
+            max_view_disagreement: Max tolerated view disagreement before confidence penalty.
         """
         self.seq_len = seq_len
         self.confidence_threshold = confidence_threshold
@@ -84,6 +90,9 @@ class SignFlowInferencePipeline:
         self.min_motion_energy = min_motion_energy
         self.pre_roll_frames = max(0, pre_roll_frames)
         self.frontend_confidence_floor = float(np.clip(frontend_confidence_floor, 0.0, 1.0))
+        self.inference_num_views = max(1, int(inference_num_views))
+        self.inference_temperature = float(max(0.1, inference_temperature))
+        self.max_view_disagreement = float(max(1e-6, max_view_disagreement))
         self.device = torch.device(device)
         self.frame_buffer: deque[np.ndarray] = deque(maxlen=max_buffer_frames)
         self.hand_visibility_history: deque[float] = deque(maxlen=seq_len)
@@ -321,17 +330,9 @@ class SignFlowInferencePipeline:
             return "NONE", 0.0, []
 
         try:
-            # Convert to PyTorch tensor
-            tensor = torch.from_numpy(window).float().unsqueeze(0)  # [1, seq_len, features]
-            tensor = tensor.to(self.device)
-
-            # Forward pass
-            with torch.no_grad():
-                logits = self.model(tensor)  # [1, num_classes]
-                probabilities = torch.softmax(logits, dim=1)  # [1, num_classes]
+            probs, view_disagreement = self._infer_probabilities(window)
 
             # Get top predictions
-            probs = probabilities[0].cpu().numpy()
             top_k = min(4, len(probs))  # Get top 4 predictions
             top_indices = np.argsort(probs)[-top_k:][::-1]
 
@@ -373,6 +374,7 @@ class SignFlowInferencePipeline:
                 probs=probs,
                 top_indices=top_indices,
                 raw_confidence=raw_confidence,
+                disagreement=view_disagreement,
             )
 
             # If confidence margin is too low, treat prediction as NONE.
@@ -384,6 +386,58 @@ class SignFlowInferencePipeline:
         except Exception as e:
             logger.error("inference_failed", error=str(e), exc_info=True)
             return "NONE", 0.0, []
+
+    def _infer_probabilities(self, window: np.ndarray) -> tuple[np.ndarray, float]:
+        """Run inference on one or multiple temporal views and return mean probabilities."""
+        if self.model is None:
+            return np.array([], dtype=np.float32), 0.0
+
+        views = self._build_inference_views(window)
+        stacked_probs: list[torch.Tensor] = []
+
+        with torch.no_grad():
+            for view in views:
+                tensor = torch.from_numpy(view).float().unsqueeze(0).to(self.device)
+                logits = self.model(tensor)
+                probs = torch.softmax(logits / self.inference_temperature, dim=1)
+                stacked_probs.append(probs.squeeze(0))
+
+        if not stacked_probs:
+            return np.array([], dtype=np.float32), 0.0
+
+        probs_stack = torch.stack(stacked_probs, dim=0)
+        mean_probs = probs_stack.mean(dim=0)
+        mean_probs = mean_probs / mean_probs.sum().clamp_min(1e-8)
+        disagreement = float(probs_stack.std(dim=0, unbiased=False).mean().item())
+        return mean_probs.cpu().numpy(), disagreement
+
+    def _build_inference_views(self, window: np.ndarray) -> list[np.ndarray]:
+        """Create lightweight temporal views for test-time ensembling."""
+        views = [window.astype(np.float32, copy=False)]
+        if self.inference_num_views <= 1 or window.ndim != 2 or window.shape[0] < 8:
+            return views
+
+        shift = max(1, window.shape[0] // 16)
+        if len(views) < self.inference_num_views:
+            views.append(np.roll(window, shift=shift, axis=0).astype(np.float32, copy=False))
+        if len(views) < self.inference_num_views:
+            views.append(np.roll(window, shift=-shift, axis=0).astype(np.float32, copy=False))
+
+        if len(views) < self.inference_num_views:
+            from app.ml.dataset import temporal_resample
+
+            margin = max(1, window.shape[0] // 8)
+            if window.shape[0] > (2 * margin + 2):
+                cropped = window[margin:-margin]
+            else:
+                cropped = window
+            cropped = temporal_resample(cropped, target_len=window.shape[0])
+            views.append(cropped.astype(np.float32, copy=False))
+
+        while len(views) < self.inference_num_views:
+            views.append(window.astype(np.float32, copy=False))
+
+        return views[: self.inference_num_views]
 
     def _smooth(self) -> tuple[str, float]:
         """Apply majority-vote smoothing with confidence stabilization."""
@@ -539,6 +593,7 @@ class SignFlowInferencePipeline:
         probs: np.ndarray,
         top_indices: np.ndarray,
         raw_confidence: float,
+        disagreement: float = 0.0,
     ) -> float:
         """Calibrate confidence with margin and distribution certainty."""
         if raw_confidence <= 0.0:
@@ -565,5 +620,11 @@ class SignFlowInferencePipeline:
             calibrated *= margin / self.min_prediction_margin
         if self._current_motion_energy < self.min_motion_energy:
             calibrated *= 0.85
+
+        if self.inference_num_views > 1:
+            disagreement_ratio = np.clip(disagreement / self.max_view_disagreement, 0.0, 1.0)
+            calibrated *= 1.0 - (0.35 * disagreement_ratio)
+            if disagreement > self.max_view_disagreement:
+                calibrated *= 0.8
 
         return float(np.clip(calibrated, 0.0, 1.0))

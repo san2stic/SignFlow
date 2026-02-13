@@ -110,6 +110,8 @@ def prepare_few_shot_model(
             nhead=checkpoint.get("nhead", 8),
             num_layers=checkpoint.get("num_layers", 4),
             use_cls_token=checkpoint.get("use_cls_token", True),
+            token_dropout=checkpoint.get("token_dropout", 0.0),
+            temporal_smoothing=checkpoint.get("temporal_smoothing", 0.0),
         )
         try:
             model.load_state_dict(checkpoint["model_state_dict"], strict=True)

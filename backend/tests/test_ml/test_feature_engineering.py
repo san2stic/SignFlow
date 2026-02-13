@@ -2,14 +2,14 @@
 from __future__ import annotations
 
 import numpy as np
-import pytest
 
 from app.ml.feature_engineering import (
     compute_enriched_features,
-    compute_velocities,
     compute_hand_distances,
-    compute_joint_angles,
     compute_hand_shape_features,
+    compute_joint_angles,
+    compute_velocities,
+    normalize_body_frame,
     ENRICHED_FEATURE_DIM,
 )
 
@@ -75,3 +75,16 @@ def test_compute_enriched_features_single_frame():
     enriched = compute_enriched_features(seq)
     assert enriched.shape[0] == 1
     assert enriched.shape[1] == ENRICHED_FEATURE_DIM
+
+
+def test_normalize_body_frame_is_translation_invariant():
+    seq = _make_sequence(6, 225)
+    translated = seq.copy()
+    translated[:, 0::3] += 0.35
+    translated[:, 1::3] -= 0.22
+    translated[:, 2::3] += 0.18
+
+    normalized = normalize_body_frame(seq)
+    normalized_translated = normalize_body_frame(translated)
+
+    assert np.allclose(normalized, normalized_translated, atol=1e-4)

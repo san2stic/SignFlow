@@ -136,3 +136,36 @@ def test_pipeline_prediction_filters_reject_below_threshold() -> None:
     )
     assert accepted_label == "bonjour"
     assert accepted_confidence >= 0.82
+
+
+def test_pipeline_builds_multiple_inference_views() -> None:
+    """TTA helper should generate the configured number of temporal views."""
+    pipeline = SignFlowInferencePipeline(seq_len=64, inference_num_views=4)
+    window = np.random.default_rng(42).standard_normal((64, 469)).astype(np.float32)
+
+    views = pipeline._build_inference_views(window)
+
+    assert len(views) == 4
+    assert all(view.shape == window.shape for view in views)
+
+
+def test_pipeline_confidence_penalizes_high_view_disagreement() -> None:
+    """Calibration should lower confidence when TTA views disagree strongly."""
+    pipeline = SignFlowInferencePipeline(inference_num_views=3, max_view_disagreement=0.2)
+    probs = np.array([0.85, 0.1, 0.05], dtype=np.float32)
+    top_indices = np.array([0, 1, 2], dtype=np.int64)
+
+    low_disagreement = pipeline._calibrate_confidence(
+        probs=probs,
+        top_indices=top_indices,
+        raw_confidence=0.85,
+        disagreement=0.02,
+    )
+    high_disagreement = pipeline._calibrate_confidence(
+        probs=probs,
+        top_indices=top_indices,
+        raw_confidence=0.85,
+        disagreement=0.4,
+    )
+
+    assert low_disagreement > high_disagreement

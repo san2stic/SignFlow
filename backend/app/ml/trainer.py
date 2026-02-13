@@ -15,6 +15,7 @@ import torch
 import torch.nn as nn
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import LambdaLR
+from torch.optim.swa_utils import AveragedModel, update_bn
 from torch.utils.data import DataLoader, WeightedRandomSampler
 
 from app.ml.dataset import LandmarkDataset
@@ -35,6 +36,9 @@ class TrainingConfig:
     early_stopping_patience: int = 15       # was 10
     early_stopping_min_delta: float = 1e-4
     gradient_clip_max_norm: float = 1.0
+    gradient_accumulation_steps: int = 1
+    temporal_mask_prob: float = 0.15
+    temporal_mask_span_ratio: float = 0.2
 
     weight_decay: float = 0.05              # was 0.01
     classifier_lr_multiplier: float = 2.0
@@ -53,6 +57,12 @@ class TrainingConfig:
 
     use_ema: bool = True
     ema_decay: float = 0.995
+
+    use_amp: bool = True
+    amp_dtype: str = "float16"  # "float16" | "bfloat16"
+    use_swa: bool = True
+    swa_start_ratio: float = 0.75
+    swa_lr: float | None = None
 
 
 @dataclass
@@ -145,6 +155,15 @@ class SignTrainer:
         # Move model to device
         self.device = torch.device(config.device)
         self.model.to(self.device)
+        self.accumulation_steps = max(1, int(self.config.gradient_accumulation_steps))
+        self.autocast_enabled = bool(self.config.use_amp and self.device.type == "cuda")
+        self.autocast_dtype = (
+            torch.bfloat16 if self.config.amp_dtype == "bfloat16" else torch.float16
+        )
+        try:
+            self.grad_scaler = torch.amp.GradScaler("cuda", enabled=self.autocast_enabled)
+        except (AttributeError, TypeError):
+            self.grad_scaler = torch.cuda.amp.GradScaler(enabled=self.autocast_enabled)
 
         # Loss function (initialized in fit once class distribution is known)
         self.criterion: nn.Module = nn.CrossEntropyLoss(label_smoothing=self.config.label_smoothing)
@@ -199,6 +218,19 @@ class SignTrainer:
                 for name, parameter in self.model.named_parameters()
                 if parameter.requires_grad
             }
+
+        # Stochastic Weight Averaging for stronger final generalization.
+        self.swa_model: AveragedModel | None = None
+        self._swa_started = False
+        self._swa_start_epoch = max(1, int(math.ceil(self.config.num_epochs * self.config.swa_start_ratio)))
+        if self.config.use_swa:
+            self.swa_model = AveragedModel(self.model)
+
+    def _autocast_context(self):
+        """Return autocast context when CUDA AMP is enabled."""
+        if not self.autocast_enabled:
+            return contextlib.nullcontext()
+        return torch.autocast(device_type="cuda", dtype=self.autocast_dtype)
 
     @staticmethod
     def _build_lr_lambda(num_epochs: int, warmup_epochs: int) -> Callable[[int], float]:
@@ -325,6 +357,112 @@ class SignTrainer:
                     continue
                 self.ema_state[name].mul_(decay).add_(parameter.detach(), alpha=(1.0 - decay))
 
+    def _apply_temporal_mask(self, landmarks: torch.Tensor) -> torch.Tensor:
+        """Mask contiguous temporal spans to regularize against tracking dropouts."""
+        if (
+            self.config.temporal_mask_prob <= 0.0
+            or self.config.temporal_mask_span_ratio <= 0.0
+            or landmarks.ndim != 3
+            or landmarks.size(1) < 4
+        ):
+            return landmarks
+
+        masked = landmarks.clone()
+        batch_size, seq_len, _num_features = masked.shape
+        max_span = max(1, int(seq_len * self.config.temporal_mask_span_ratio))
+        mask_prob = float(np.clip(self.config.temporal_mask_prob, 0.0, 1.0))
+
+        for batch_idx in range(batch_size):
+            if np.random.random() > mask_prob:
+                continue
+            span = int(np.random.randint(1, max_span + 1))
+            start = int(np.random.randint(0, max(1, seq_len - span + 1)))
+            masked[batch_idx, start : start + span] = 0.0
+
+        return masked
+
+    def _optimizer_step(self) -> None:
+        """Apply optimizer step with optional AMP scaler."""
+        if self.autocast_enabled:
+            self.grad_scaler.unscale_(self.optimizer)
+
+        torch.nn.utils.clip_grad_norm_(
+            self.model.parameters(),
+            max_norm=self.config.gradient_clip_max_norm,
+        )
+
+        if self.autocast_enabled:
+            self.grad_scaler.step(self.optimizer)
+            self.grad_scaler.update()
+        else:
+            self.optimizer.step()
+
+        self._update_ema()
+        self.optimizer.zero_grad(set_to_none=True)
+
+    def _validate_with_model(
+        self,
+        model: nn.Module,
+        dataloader: DataLoader,
+    ) -> tuple[float, float]:
+        """Run validation metrics on a provided model without EMA swapping."""
+        model.eval()
+        total_loss = 0.0
+        correct = 0
+        total = 0
+        steps = 0
+
+        with torch.no_grad():
+            for landmarks, labels in dataloader:
+                landmarks = landmarks.to(self.device)
+                labels = labels.to(self.device)
+
+                with self._autocast_context():
+                    logits = model(landmarks)
+                    loss = self.criterion(logits, labels)
+
+                total_loss += float(loss.item())
+                predictions = torch.argmax(logits, dim=1)
+                correct += int((predictions == labels).sum().item())
+                total += int(labels.size(0))
+                steps += 1
+
+        avg_loss = total_loss / steps if steps > 0 else 0.0
+        accuracy = correct / total if total > 0 else 0.0
+        return avg_loss, accuracy
+
+    def _maybe_update_swa(self, epoch: int) -> None:
+        """Accumulate SWA weights once the configured epoch ratio is reached."""
+        if self.swa_model is None:
+            return
+        if epoch < self._swa_start_epoch:
+            return
+        self.swa_model.update_parameters(self.model)
+        self._swa_started = True
+
+    def _maybe_select_swa_model(self, train_loader: DataLoader, val_loader: DataLoader) -> None:
+        """Evaluate SWA model and keep it if it outperforms the current best checkpoint."""
+        if self.swa_model is None or not self._swa_started:
+            return
+
+        try:
+            update_bn(train_loader, self.swa_model, device=self.device)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("swa_batch_norm_update_failed", error=str(exc))
+
+        swa_val_loss, swa_val_accuracy = self._validate_with_model(self.swa_model, val_loader)
+        if swa_val_loss < (self.best_val_loss - self.config.early_stopping_min_delta):
+            self.best_val_loss = swa_val_loss
+            self.best_model_state = {
+                key: value.detach().cpu().clone()
+                for key, value in self.swa_model.module.state_dict().items()
+            }
+            logger.info(
+                "swa_selected_as_best_model",
+                swa_val_loss=swa_val_loss,
+                swa_val_acc=swa_val_accuracy,
+            )
+
     @contextlib.contextmanager
     def _swap_to_ema_weights(self):
         """Temporarily swap model weights to EMA values during evaluation."""
@@ -366,45 +504,54 @@ class SignTrainer:
         correct = 0.0
         total = 0
         steps = 0
+        pending_grad_batches = 0
+        total_batches = len(dataloader)
 
-        for landmarks, labels in dataloader:
+        self.optimizer.zero_grad(set_to_none=True)
+
+        for batch_idx, (landmarks, labels) in enumerate(dataloader):
             # Move to device
             landmarks = landmarks.to(self.device)  # [batch, seq_len, features]
             labels = labels.to(self.device)  # [batch]
+            landmarks = self._apply_temporal_mask(landmarks)
 
             # Forward pass
-            self.optimizer.zero_grad()
+            with self._autocast_context():
+                if self.config.use_mixup and labels.size(0) >= 2:
+                    mixed_landmarks, labels_a, labels_b, lam = self._mixup_batch(landmarks, labels)
+                    logits = self.model(mixed_landmarks)
+                    loss = self._compute_mixup_loss(logits, labels_a, labels_b, lam)
+                    predictions = torch.argmax(logits, dim=1)
+                    # Soft accuracy estimate under mixed labels.
+                    batch_correct = lam * (predictions == labels_a).sum().item() + (1.0 - lam) * (
+                        predictions == labels_b
+                    ).sum().item()
+                    correct += float(batch_correct)
+                else:
+                    logits = self.model(landmarks)  # [batch, num_classes]
+                    loss = self.criterion(logits, labels)
+                    predictions = torch.argmax(logits, dim=1)
+                    correct += float((predictions == labels).sum().item())
 
-            if self.config.use_mixup and labels.size(0) >= 2:
-                mixed_landmarks, labels_a, labels_b, lam = self._mixup_batch(landmarks, labels)
-                logits = self.model(mixed_landmarks)
-                loss = self._compute_mixup_loss(logits, labels_a, labels_b, lam)
-                predictions = torch.argmax(logits, dim=1)
-                # Soft accuracy estimate under mixed labels.
-                batch_correct = lam * (predictions == labels_a).sum().item() + (1.0 - lam) * (
-                    predictions == labels_b
-                ).sum().item()
-                correct += float(batch_correct)
-            else:
-                logits = self.model(landmarks)  # [batch, num_classes]
-                loss = self.criterion(logits, labels)
-                predictions = torch.argmax(logits, dim=1)
-                correct += float((predictions == labels).sum().item())
+            loss_value = float(loss.item())
+            scaled_loss = loss / self.accumulation_steps
 
             # Backward pass
-            loss.backward()
+            if self.autocast_enabled:
+                self.grad_scaler.scale(scaled_loss).backward()
+            else:
+                scaled_loss.backward()
+            pending_grad_batches += 1
 
-            # Gradient clipping
-            torch.nn.utils.clip_grad_norm_(
-                self.model.parameters(),
-                max_norm=self.config.gradient_clip_max_norm,
-            )
-
-            self.optimizer.step()
-            self._update_ema()
+            should_step = pending_grad_batches >= self.accumulation_steps or (
+                batch_idx + 1
+            ) == total_batches
+            if should_step:
+                self._optimizer_step()
+                pending_grad_batches = 0
 
             # Metrics
-            total_loss += float(loss.item())
+            total_loss += loss_value
             total += int(labels.size(0))
             steps += 1
 
@@ -412,6 +559,10 @@ class SignTrainer:
             if self.stop_signal and self.stop_signal():
                 logger.info("training_interrupted_by_stop_signal")
                 break
+
+        # Ensure no gradients remain pending if the loop exits early.
+        if pending_grad_batches > 0:
+            self._optimizer_step()
 
         avg_loss = total_loss / steps if steps > 0 else 0.0
         accuracy = correct / total if total > 0 else 0.0
@@ -441,10 +592,10 @@ class SignTrainer:
                 labels = labels.to(self.device)
 
                 # Forward pass
-                logits = self.model(landmarks)
-
-                # Compute loss
-                loss = self.criterion(logits, labels)
+                with self._autocast_context():
+                    logits = self.model(landmarks)
+                    # Compute loss
+                    loss = self.criterion(logits, labels)
 
                 # Metrics
                 total_loss += float(loss.item())
@@ -508,6 +659,7 @@ class SignTrainer:
 
             # Validate
             val_loss, val_accuracy = self.validate(val_loader)
+            self._maybe_update_swa(epoch + 1)
 
             # Scheduler step
             self.scheduler.step()
@@ -568,6 +720,8 @@ class SignTrainer:
                     )
                     break
 
+        self._maybe_select_swa_model(train_loader, val_loader)
+
         # Restore best model
         if self.best_model_state is not None:
             self.model.load_state_dict(self.best_model_state)
@@ -594,6 +748,8 @@ class SignTrainer:
             "nhead": self.model.nhead,
             "num_layers": self.model.num_layers,
             "use_cls_token": getattr(self.model, "use_cls_token", True),
+            "token_dropout": getattr(self.model, "token_dropout", 0.0),
+            "temporal_smoothing": getattr(self.model, "temporal_smoothing", 0.0),
             "class_labels": class_labels or [],
             "config": {
                 "num_epochs": self.config.num_epochs,
@@ -606,6 +762,14 @@ class SignTrainer:
                 "mixup_alpha": self.config.mixup_alpha,
                 "use_ema": self.config.use_ema,
                 "ema_decay": self.config.ema_decay,
+                "gradient_accumulation_steps": self.config.gradient_accumulation_steps,
+                "temporal_mask_prob": self.config.temporal_mask_prob,
+                "temporal_mask_span_ratio": self.config.temporal_mask_span_ratio,
+                "use_amp": self.config.use_amp,
+                "amp_dtype": self.config.amp_dtype,
+                "use_swa": self.config.use_swa,
+                "swa_start_ratio": self.config.swa_start_ratio,
+                "swa_lr": self.config.swa_lr,
             },
             "metrics_history": [
                 {
@@ -655,6 +819,8 @@ def load_model_checkpoint(checkpoint_path: str | Path, device: str = "cpu") -> S
             nhead=checkpoint.get("nhead", 8),
             num_layers=checkpoint.get("num_layers", 4),
             use_cls_token=checkpoint.get("use_cls_token", True),
+            token_dropout=checkpoint.get("token_dropout", 0.0),
+            temporal_smoothing=checkpoint.get("temporal_smoothing", 0.0),
         )
 
         # Load weights (strict first, fallback for backward compatibility).

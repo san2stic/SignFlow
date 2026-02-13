@@ -27,6 +27,8 @@ _LEFT_ELBOW = 13
 _RIGHT_ELBOW = 14
 _LEFT_WRIST = 15
 _RIGHT_WRIST = 16
+_LEFT_HIP = 23
+_RIGHT_HIP = 24
 
 # Hand landmark indices (within each hand block, each point = 3 values)
 _WRIST = 0
@@ -133,6 +135,37 @@ def compute_hand_shape_features(seq: np.ndarray) -> np.ndarray:
     return features
 
 
+def normalize_body_frame(seq: np.ndarray) -> np.ndarray:
+    """
+    Normalize landmarks around body center and shoulder scale.
+
+    This improves cross-user invariance (camera distance/body size) while keeping
+    the same output dimensionality for backward compatibility.
+    """
+    if seq.ndim != 2 or seq.shape[1] < _POSE_END:
+        return seq.astype(np.float32, copy=True)
+
+    normalized = seq.astype(np.float32, copy=True)
+    pose_left_shoulder = _pose_point(normalized, _LEFT_SHOULDER)
+    pose_right_shoulder = _pose_point(normalized, _RIGHT_SHOULDER)
+    pose_left_hip = _pose_point(normalized, _LEFT_HIP)
+    pose_right_hip = _pose_point(normalized, _RIGHT_HIP)
+
+    shoulder_center = (pose_left_shoulder + pose_right_shoulder) * 0.5
+    hip_center = (pose_left_hip + pose_right_hip) * 0.5
+
+    hip_valid = (_safe_norm(hip_center) > 1e-5).reshape(-1, 1)
+    center = np.where(hip_valid, hip_center, shoulder_center)
+
+    body_scale = _safe_norm(pose_left_shoulder - pose_right_shoulder).reshape(-1, 1)
+    body_scale = np.where(body_scale > 1e-4, body_scale, 1.0)
+
+    points = normalized.reshape(normalized.shape[0], -1, 3)
+    points = (points - center[:, None, :]) / body_scale[:, None, :]
+    points = np.clip(points, -5.0, 5.0)
+    return points.reshape(normalized.shape)
+
+
 def compute_enriched_features(seq: np.ndarray) -> np.ndarray:
     """
     Compute enriched features from raw 225-dim landmark sequence.
@@ -140,13 +173,14 @@ def compute_enriched_features(seq: np.ndarray) -> np.ndarray:
     Input:  [num_frames, 225]
     Output: [num_frames, ENRICHED_FEATURE_DIM]  (469)
     """
-    velocities = compute_velocities(seq)
-    hand_distances = compute_hand_distances(seq)
-    joint_angles = compute_joint_angles(seq)
-    hand_shapes = compute_hand_shape_features(seq)
+    normalized = normalize_body_frame(seq)
+    velocities = compute_velocities(normalized)
+    hand_distances = compute_hand_distances(normalized)
+    joint_angles = compute_joint_angles(normalized)
+    hand_shapes = compute_hand_shape_features(normalized)
 
     enriched = np.concatenate([
-        seq,
+        normalized,
         velocities,
         hand_distances,
         joint_angles,

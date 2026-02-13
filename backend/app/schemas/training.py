@@ -26,6 +26,15 @@ class TrainingConfig(BaseModel):
     mixup_alpha: float = Field(default=0.3, ge=0.0, le=1.0)
     use_ema: bool = True
     ema_decay: float = Field(default=0.995, ge=0.8, le=0.9999)
+    gradient_accumulation_steps: int = Field(default=1, ge=1, le=16)
+    temporal_mask_prob: float = Field(default=0.15, ge=0.0, le=1.0)
+    temporal_mask_span_ratio: float = Field(default=0.2, ge=0.0, le=0.8)
+    use_amp: bool = True
+    amp_dtype: Literal["float16", "bfloat16"] = "float16"
+    use_swa: bool = True
+    swa_start_ratio: float = Field(default=0.75, ge=0.1, le=0.95)
+    swa_lr: float | None = Field(default=None, gt=0, le=1)
+    freeze_until_layer: int = Field(default=2, ge=0, le=8)
     min_deploy_accuracy: float = Field(default=0.85, ge=0.0, le=1.0)
 
 
