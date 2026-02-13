@@ -48,12 +48,16 @@ docker compose up --build
 
 ```bash
 cp .env.example .env
-# adapter SIGNFLOW_DOMAIN dans .env (localhost par défaut)
+# définir SIGNFLOW_DOMAIN + credentials DB/Redis + auth Caddy dans .env
+# générer le hash Caddy:
+# docker run --rm caddy:2-alpine caddy hash-password --plaintext 'mot-de-passe-fort'
 docker compose -f docker-compose.prod.yml up --build
 ```
 
 - Entrée unique via Caddy: `http://localhost` (ou votre domaine)
 - API routée via `/api/*`
+- Accès protégé par HTTP Basic Auth (Caddy)
+- `/docs` et `/openapi.json` désactivés par défaut en production
 
 ## Setup dataset LSFB / WLASL
 

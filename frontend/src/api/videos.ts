@@ -38,11 +38,11 @@ export async function getSuggestions(
   videoId: string,
   threshold: number = 0.75
 ): Promise<{ suggestions: SuggestedVideo[] }> {
+  const query = `?threshold=${encodeURIComponent(String(threshold))}`;
   return apiFetch<{ suggestions: SuggestedVideo[] }>(
-    `/videos/${videoId}/suggestions`,
+    `/videos/${videoId}/suggestions${query}`,
     {
-      method: 'POST',
-      body: JSON.stringify({ threshold })
+      method: 'POST'
     }
   );
 }

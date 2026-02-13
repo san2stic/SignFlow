@@ -1,16 +1,17 @@
 """Video labeling endpoints with ML-based suggestions."""
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
 import structlog
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy import update
 from sqlalchemy.orm import Session
 
-from app.database import SessionLocal
+from app.api.deps import enforce_rate_limit, enforce_write_rate_limit, get_db
 from app.models.video import Video
 from app.ml.similarity import find_similar_videos
 
@@ -26,10 +27,13 @@ class VideoResponse(BaseModel):
     id: str
     sign_id: Optional[str]
     file_path: str
+    thumbnail_path: Optional[str]
+    resolution: str
     landmarks_path: Optional[str]
     landmarks_extracted: bool
     duration_ms: int
     fps: int
+    created_at: datetime
 
 
 class UnlabeledVideosResponse(BaseModel):
@@ -47,10 +51,17 @@ class BulkLabelRequest(BaseModel):
 
 
 class SuggestionResponse(BaseModel):
-    video_id: str
+    id: str
+    sign_id: Optional[str]
     similarity_score: float
     file_path: str
+    thumbnail_path: Optional[str]
+    resolution: str
     landmarks_path: Optional[str]
+    landmarks_extracted: bool
+    duration_ms: int
+    fps: int
+    created_at: datetime
 
 
 class SuggestionsResponse(BaseModel):
@@ -58,17 +69,29 @@ class SuggestionsResponse(BaseModel):
     suggestions: list[SuggestionResponse]
 
 
-# Dependency
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
+def _public_media_path(video_id: str) -> str:
+    """Build API stream path without exposing local filesystem paths."""
+    return f"/api/v1/media/{video_id}/stream"
+
+
+def _to_video_response(video: Video) -> VideoResponse:
+    """Serialize ORM video object into public-safe response shape."""
+    return VideoResponse(
+        id=video.id,
+        sign_id=video.sign_id,
+        file_path=_public_media_path(video.id),
+        thumbnail_path=None,
+        resolution=video.resolution,
+        landmarks_path=None,
+        landmarks_extracted=video.landmarks_extracted,
+        duration_ms=video.duration_ms,
+        fps=video.fps,
+        created_at=video.created_at,
+    )
 
 
 # Endpoints
-@router.get("/unlabeled", response_model=UnlabeledVideosResponse)
+@router.get("/unlabeled", response_model=UnlabeledVideosResponse, dependencies=[Depends(enforce_rate_limit)])
 def get_unlabeled_videos(db: Session = Depends(get_db)):
     """
     List all videos without sign_id (unlabeled videos).
@@ -79,12 +102,12 @@ def get_unlabeled_videos(db: Session = Depends(get_db)):
     videos = db.query(Video).filter(Video.sign_id.is_(None)).all()
 
     return UnlabeledVideosResponse(
-        items=[VideoResponse.model_validate(v) for v in videos],
+        items=[_to_video_response(v) for v in videos],
         total=len(videos)
     )
 
 
-@router.patch("/{video_id}/label", response_model=VideoResponse)
+@router.patch("/{video_id}/label", response_model=VideoResponse, dependencies=[Depends(enforce_write_rate_limit)])
 def label_video(
     video_id: str,
     request: LabelRequest,
@@ -112,14 +135,14 @@ def label_video(
     db.commit()
     db.refresh(video)
 
-    return VideoResponse.model_validate(video)
+    return _to_video_response(video)
 
 
-@router.post("/{video_id}/suggestions", response_model=SuggestionsResponse)
+@router.post("/{video_id}/suggestions", response_model=SuggestionsResponse, dependencies=[Depends(enforce_rate_limit)])
 def get_label_suggestions(
     video_id: str,
-    threshold: float = 0.75,
-    top_k: int = 5,
+    threshold: float = Query(default=0.75, ge=0.0, le=1.0),
+    top_k: int = Query(default=5, ge=1, le=20),
     db: Session = Depends(get_db)
 ):
     """
@@ -156,7 +179,7 @@ def get_label_suggestions(
     # Find unlabeled candidates with landmarks
     candidates = db.query(Video).filter(
         Video.sign_id.is_(None),
-        Video.landmarks_extracted == True,
+        Video.landmarks_extracted,
         Video.landmarks_path.isnot(None),
         Video.id != video_id  # Exclude self
     ).all()
@@ -184,10 +207,17 @@ def get_label_suggestions(
         video = path_to_video.get(str(path))
         if video:
             suggestions.append(SuggestionResponse(
-                video_id=video.id,
+                id=video.id,
+                sign_id=video.sign_id,
                 similarity_score=score,
-                file_path=video.file_path,
-                landmarks_path=video.landmarks_path
+                file_path=_public_media_path(video.id),
+                thumbnail_path=None,
+                resolution=video.resolution,
+                landmarks_path=None,
+                landmarks_extracted=video.landmarks_extracted,
+                duration_ms=video.duration_ms,
+                fps=video.fps,
+                created_at=video.created_at,
             ))
 
     return SuggestionsResponse(
@@ -196,7 +226,7 @@ def get_label_suggestions(
     )
 
 
-@router.patch("/bulk-label", response_model=dict)
+@router.patch("/bulk-label", response_model=dict, dependencies=[Depends(enforce_write_rate_limit)])
 def bulk_label_videos(
     request: BulkLabelRequest,
     db: Session = Depends(get_db)

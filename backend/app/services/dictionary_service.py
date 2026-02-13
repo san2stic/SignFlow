@@ -5,11 +5,12 @@ from __future__ import annotations
 import json
 import os
 import re
+import tempfile
 import uuid
 import zipfile
 from pathlib import Path
 
-from fastapi import UploadFile
+from fastapi import HTTPException, UploadFile, status
 from slugify import slugify
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session, selectinload
@@ -102,10 +103,32 @@ class DictionaryService:
             return export_dictionary_obsidian(signs, output)
         raise ValueError("Unsupported export format")
 
-    def import_archive(self, db: Session, archive: UploadFile) -> dict:
+    def import_archive(self, db: Session, archive: UploadFile, *, settings: Settings) -> dict:
         """Import dictionary bundle from JSON or markdown-based archives."""
-        tmp_path = Path("/tmp") / f"signflow_import_{uuid.uuid4()}.zip"
-        tmp_path.write_bytes(archive.file.read())
+        max_archive_bytes = settings.max_dictionary_import_mb * 1024 * 1024
+        max_entry_bytes = settings.max_dictionary_import_file_mb * 1024 * 1024
+        max_uncompressed_bytes = settings.max_dictionary_import_uncompressed_mb * 1024 * 1024
+
+        with tempfile.NamedTemporaryFile(prefix="signflow_import_", suffix=".zip", delete=False) as tmp_file:
+            tmp_path = Path(tmp_file.name)
+            total_written = 0
+            while True:
+                chunk = archive.file.read(1024 * 1024)
+                if not chunk:
+                    break
+                total_written += len(chunk)
+                if total_written > max_archive_bytes:
+                    tmp_file.close()
+                    tmp_path.unlink(missing_ok=True)
+                    raise HTTPException(
+                        status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                        detail=f"Archive exceeds maximum size ({settings.max_dictionary_import_mb} MB)",
+                    )
+                tmp_file.write(chunk)
+
+        if total_written == 0:
+            tmp_path.unlink(missing_ok=True)
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Archive is empty")
 
         existing_slugs = set(db.scalars(select(Sign.slug)).all())
         imported_signs = 0
@@ -114,39 +137,87 @@ class DictionaryService:
         errors: list[str] = []
         pending: list[dict] = []
 
-        with zipfile.ZipFile(tmp_path, "r") as zf:
-            names = zf.namelist()
+        try:
+            with zipfile.ZipFile(tmp_path, "r") as zf:
+                infos = [item for item in zf.infolist() if not item.is_dir()]
+                if len(infos) > settings.max_dictionary_import_files:
+                    raise HTTPException(
+                        status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                        detail=f"Archive has too many files (max {settings.max_dictionary_import_files})",
+                    )
 
-            if "dictionary.json" in names:
-                try:
-                    raw = zf.read("dictionary.json").decode("utf-8")
-                    payload = json.loads(raw)
-                    if isinstance(payload, list):
-                        for item in payload:
-                            if not isinstance(item, dict):
-                                skipped += 1
-                                continue
-                            pending.append(self._normalize_json_item(item))
-                    else:
-                        errors.append("dictionary.json must contain a list payload")
-                except Exception as exc:  # noqa: BLE001
-                    errors.append(f"Failed to parse dictionary.json: {exc}")
+                total_uncompressed = 0
+                names: list[str] = []
+                for info in infos:
+                    info_path = Path(info.filename)
+                    if info_path.is_absolute() or ".." in info_path.parts:
+                        skipped += 1
+                        errors.append(f"Rejected unsafe archive path: {info.filename}")
+                        continue
 
-            markdown_files = [
-                name
-                for name in names
-                if name.lower().endswith(".md")
-                and not name.lower().endswith("readme.md")
-                and "/." not in name
-            ]
-            for path in markdown_files:
-                try:
-                    content = zf.read(path).decode("utf-8")
-                    fallback_slug = slugify(Path(path).stem) or f"imported-{uuid.uuid4().hex[:8]}"
-                    pending.append(self._parse_markdown_item(content, fallback_slug=fallback_slug))
-                except Exception as exc:  # noqa: BLE001
-                    errors.append(f"Failed to parse markdown file {path}: {exc}")
-                    skipped += 1
+                    if info.file_size > max_entry_bytes:
+                        raise HTTPException(
+                            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                            detail=(
+                                f"Archive entry too large ({info.filename}, "
+                                f"max {settings.max_dictionary_import_file_mb} MB)"
+                            ),
+                        )
+
+                    total_uncompressed += info.file_size
+                    if total_uncompressed > max_uncompressed_bytes:
+                        raise HTTPException(
+                            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                            detail=(
+                                "Archive exceeds maximum uncompressed size "
+                                f"({settings.max_dictionary_import_uncompressed_mb} MB)"
+                            ),
+                        )
+
+                    if info.compress_size > 0:
+                        ratio = info.file_size / max(1, info.compress_size)
+                        if ratio > settings.max_dictionary_import_compression_ratio:
+                            raise HTTPException(
+                                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                                detail=f"Suspicious compression ratio in {info.filename}",
+                            )
+                    names.append(info.filename)
+
+                dictionary_json_entry = next((name for name in names if Path(name).name == "dictionary.json"), None)
+                if dictionary_json_entry:
+                    try:
+                        raw = zf.read(dictionary_json_entry).decode("utf-8")
+                        payload = json.loads(raw)
+                        if isinstance(payload, list):
+                            for item in payload:
+                                if not isinstance(item, dict):
+                                    skipped += 1
+                                    continue
+                                pending.append(self._normalize_json_item(item))
+                        else:
+                            errors.append("dictionary.json must contain a list payload")
+                    except Exception as exc:  # noqa: BLE001
+                        errors.append(f"Failed to parse dictionary.json: {exc}")
+
+                markdown_files = [
+                    name
+                    for name in names
+                    if name.lower().endswith(".md")
+                    and not name.lower().endswith("readme.md")
+                    and "/." not in name
+                ]
+                for path in markdown_files:
+                    try:
+                        content = zf.read(path).decode("utf-8")
+                        fallback_slug = slugify(Path(path).stem) or f"imported-{uuid.uuid4().hex[:8]}"
+                        pending.append(self._parse_markdown_item(content, fallback_slug=fallback_slug))
+                    except Exception as exc:  # noqa: BLE001
+                        errors.append(f"Failed to parse markdown file {path}: {exc}")
+                        skipped += 1
+        except zipfile.BadZipFile as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid ZIP archive") from exc
+        finally:
+            tmp_path.unlink(missing_ok=True)
 
         if not pending:
             return {

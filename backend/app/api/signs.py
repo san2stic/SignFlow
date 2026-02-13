@@ -7,7 +7,7 @@ import json
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
 from sqlalchemy.orm import Session
 
-from app.api.deps import enforce_rate_limit, get_app_settings, get_db
+from app.api.deps import enforce_rate_limit, enforce_write_rate_limit, get_app_settings, get_db
 from app.config import Settings
 from app.schemas.sign import Sign, SignCreate, SignListResponse, SignUpdate
 from app.schemas.video import Video, VideoCreateMetadata
@@ -60,13 +60,18 @@ def get_sign_backlinks(sign_id: str, db: Session = Depends(get_db)) -> dict:
     return {"sign_id": sign_id, "backlinks": backlinks}
 
 
-@router.post("", response_model=Sign, status_code=status.HTTP_201_CREATED, dependencies=[Depends(enforce_rate_limit)])
+@router.post(
+    "",
+    response_model=Sign,
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(enforce_rate_limit), Depends(enforce_write_rate_limit)],
+)
 def create_sign(payload: SignCreate, db: Session = Depends(get_db)) -> Sign:
     """Create a sign entry in the dictionary."""
     return sign_service.create_sign(db, payload)
 
 
-@router.put("/{sign_id}", response_model=Sign)
+@router.put("/{sign_id}", response_model=Sign, dependencies=[Depends(enforce_write_rate_limit)])
 def update_sign(sign_id: str, payload: SignUpdate, db: Session = Depends(get_db)) -> Sign:
     """Update existing sign metadata and relations."""
     sign = sign_service.update_sign(db, sign_id, payload)
@@ -75,7 +80,7 @@ def update_sign(sign_id: str, payload: SignUpdate, db: Session = Depends(get_db)
     return sign
 
 
-@router.delete("/{sign_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/{sign_id}", status_code=status.HTTP_204_NO_CONTENT, dependencies=[Depends(enforce_write_rate_limit)])
 def delete_sign(sign_id: str, db: Session = Depends(get_db)) -> None:
     """Delete sign and linked resources."""
     deleted = sign_service.delete_sign(db, sign_id)
@@ -83,7 +88,12 @@ def delete_sign(sign_id: str, db: Session = Depends(get_db)) -> None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Sign not found")
 
 
-@router.post("/{sign_id}/videos", response_model=Video, status_code=status.HTTP_201_CREATED, dependencies=[Depends(enforce_rate_limit)])
+@router.post(
+    "/{sign_id}/videos",
+    response_model=Video,
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(enforce_rate_limit), Depends(enforce_write_rate_limit)],
+)
 def upload_sign_video(
     sign_id: str,
     file: UploadFile = File(...),

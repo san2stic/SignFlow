@@ -1,8 +1,22 @@
 {$SIGNFLOW_DOMAIN:localhost} {
   encode zstd gzip
 
-  @backend path /api/* /docs* /openapi.json /healthz
+  @protected not path /healthz
+  basicauth @protected {
+    {$SIGNFLOW_BASIC_AUTH_USER} {$SIGNFLOW_BASIC_AUTH_PASSWORD_HASH}
+  }
+
+  header {
+    Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+    X-Content-Type-Options "nosniff"
+    X-Frame-Options "DENY"
+    Referrer-Policy "strict-origin-when-cross-origin"
+    Permissions-Policy "camera=(self), microphone=(), geolocation=()"
+    -Server
+  }
+
+  @backend path /api/* /healthz
   reverse_proxy @backend backend:8000
 
-  reverse_proxy frontend:80
+  reverse_proxy frontend:8080
 }

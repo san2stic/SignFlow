@@ -26,6 +26,27 @@ logger = structlog.get_logger(__name__)
 class MediaService:
     """Handles video lifecycle for sign samples and references."""
 
+    @staticmethod
+    def _public_video_path(video_id: str) -> str:
+        """Build safe API path for video playback."""
+        return f"/api/v1/media/{video_id}/stream"
+
+    def _to_schema(self, video: Video) -> VideoSchema:
+        """Convert ORM object into public-safe schema."""
+        return VideoSchema(
+            id=video.id,
+            sign_id=video.sign_id,
+            file_path=self._public_video_path(video.id),
+            thumbnail_path=None,
+            duration_ms=video.duration_ms,
+            fps=video.fps,
+            resolution=video.resolution,
+            type=video.type,
+            landmarks_extracted=video.landmarks_extracted,
+            landmarks_path=None,
+            created_at=video.created_at,
+        )
+
     def add_video(
         self,
         db: Session,
@@ -52,13 +73,6 @@ class MediaService:
         except ValueError as exc:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
-        max_bytes = settings.max_upload_mb * 1024 * 1024
-        raw_bytes = upload.file.read()
-        if not raw_bytes:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Uploaded file is empty")
-        if len(raw_bytes) > max_bytes:
-            raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail="File too large")
-
         extension = Path(filename).suffix.lower() or ".mp4"
         folder = os.path.join(settings.video_dir, video_type)
         os.makedirs(folder, exist_ok=True)
@@ -66,8 +80,32 @@ class MediaService:
         file_id = str(uuid.uuid4())
         raw_path = os.path.join(folder, f"{file_id}_raw{extension}")
         final_path = os.path.join(folder, f"{file_id}.mp4")
-        with open(raw_path, "wb") as file_obj:
-            file_obj.write(raw_bytes)
+        max_bytes = settings.max_upload_mb * 1024 * 1024
+        written_bytes = 0
+        chunk_size = 1024 * 1024
+
+        try:
+            with open(raw_path, "wb") as file_obj:
+                while True:
+                    chunk = upload.file.read(chunk_size)
+                    if not chunk:
+                        break
+                    written_bytes += len(chunk)
+                    if written_bytes > max_bytes:
+                        raise HTTPException(
+                            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                            detail="File too large",
+                        )
+                    file_obj.write(chunk)
+        except HTTPException:
+            if os.path.exists(raw_path):
+                os.remove(raw_path)
+            raise
+
+        if written_bytes == 0:
+            if os.path.exists(raw_path):
+                os.remove(raw_path)
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Uploaded file is empty")
 
         try:
             compress_video(raw_path, final_path)
@@ -143,12 +181,12 @@ class MediaService:
             # The video is still saved, landmarks can be extracted later
 
         db.refresh(video)
-        return VideoSchema.model_validate(video)
+        return self._to_schema(video)
 
     def list_sign_videos(self, db: Session, sign_id: str) -> list[VideoSchema]:
         """Return all videos for a sign sorted by creation timestamp."""
         videos = db.scalars(select(Video).where(Video.sign_id == sign_id).order_by(Video.created_at.desc())).all()
-        return [VideoSchema.model_validate(video) for video in videos]
+        return [self._to_schema(video) for video in videos]
 
     def delete_video(self, db: Session, video_id: str) -> bool:
         """Delete a video record and local file if present."""

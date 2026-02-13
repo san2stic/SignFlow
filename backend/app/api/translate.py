@@ -8,11 +8,13 @@ import time
 from pathlib import Path
 
 import structlog
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 from starlette.websockets import WebSocketState
 
+from app.api.deps import acquire_ws_slot, enforce_ws_message_rate, release_ws_slot
+from app.config import get_settings
 from app.database import SessionLocal
 from app.ml.pipeline import SignFlowInferencePipeline
 from app.models.model_version import ModelVersion
@@ -154,6 +156,15 @@ async def translate_stream(websocket: WebSocket) -> None:
     - Client sends JSON: {"timestamp": float, "frame_idx": int, "hands": {...}, "pose": [...]}
     - Server responds: {"prediction": str, "confidence": float, "alternatives": [...], ...}
     """
+    settings = get_settings()
+    slot_key = None
+    client_host = websocket.client.host if websocket.client else "unknown"
+    try:
+        slot_key = acquire_ws_slot(websocket, settings=settings, endpoint="translate-stream")
+    except HTTPException as exc:
+        await websocket.close(code=1013, reason=str(exc.detail))
+        return
+
     await websocket.accept()
 
     # Get global pipeline (with active model loaded)
@@ -177,9 +188,13 @@ async def translate_stream(websocket: WebSocket) -> None:
         while True:
             # Receive landmarks from client
             try:
+                enforce_ws_message_rate(client_host, endpoint="translate-stream", settings=settings)
                 payload = await websocket.receive_json()
             except WebSocketDisconnect:
                 raise
+            except HTTPException:
+                await websocket.close(code=1008, reason="WebSocket rate limit exceeded")
+                break
             except RuntimeError as e:
                 if _is_disconnect_runtime_error(e):
                     raise WebSocketDisconnect(code=1000) from e
@@ -301,3 +316,5 @@ async def translate_stream(websocket: WebSocket) -> None:
         if websocket.client_state == WebSocketState.CONNECTED:
             await websocket.close(code=1011, reason="Internal server error")
         return
+    finally:
+        release_ws_slot(slot_key)

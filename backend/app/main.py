@@ -8,8 +8,10 @@ try:
     import structlog
 except Exception:  # pragma: no cover
     structlog = None
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.trustedhost import TrustedHostMiddleware
+from fastapi.responses import JSONResponse
 from sqlalchemy import inspect, text
 
 from app.api.router import api_router
@@ -30,7 +32,13 @@ if structlog is not None:
 else:
     logger = logging.getLogger("signflow")
 
-app = FastAPI(title=settings.app_name, version="0.1.0")
+app = FastAPI(
+    title=settings.app_name,
+    version="0.1.0",
+    docs_url="/docs" if settings.docs_enabled else None,
+    redoc_url="/redoc" if settings.docs_enabled else None,
+    openapi_url="/openapi.json" if settings.docs_enabled else None,
+)
 
 app.add_middleware(
     CORSMiddleware,
@@ -39,6 +47,22 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.add_middleware(TrustedHostMiddleware, allowed_hosts=settings.trusted_host_list)
+
+
+@app.middleware("http")
+async def request_size_guard(request: Request, call_next):
+    """Reject oversized request bodies before expensive processing."""
+    if request.method in {"POST", "PUT", "PATCH"}:
+        content_length = request.headers.get("content-length")
+        if content_length:
+            try:
+                max_bytes = settings.max_request_mb * 1024 * 1024
+                if int(content_length) > max_bytes:
+                    return JSONResponse(status_code=413, content={"detail": "Request body too large"})
+            except ValueError:
+                return JSONResponse(status_code=400, content={"detail": "Invalid Content-Length header"})
+    return await call_next(request)
 
 
 def ensure_runtime_schema() -> None:
@@ -60,6 +84,12 @@ def ensure_runtime_schema() -> None:
 @app.on_event("startup")
 def on_startup() -> None:
     """Initialize database schema and ML pipeline for local development."""
+    if settings.env.lower() == "production":
+        if "*" in settings.cors_origin_list:
+            raise RuntimeError("CORS_ORIGINS cannot contain '*' in production")
+        if settings.docs_enabled:
+            logger.warning("docs_enabled_in_production")
+
     Base.metadata.create_all(bind=engine)
     ensure_runtime_schema()
     logger.info("app.startup", env=settings.env)
@@ -68,7 +98,7 @@ def on_startup() -> None:
     try:
         from app.api.translate import get_or_create_pipeline
 
-        pipeline = get_or_create_pipeline()
+        _ = get_or_create_pipeline()
         logger.info("inference_pipeline_preloaded")
     except Exception as e:
         logger.warning("failed_to_preload_pipeline", error=str(e))

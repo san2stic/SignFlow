@@ -7,11 +7,18 @@ import asyncio
 from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect, status
 from sqlalchemy.orm import Session
 
-from app.api.deps import enforce_rate_limit, get_db
+from app.api.deps import (
+    acquire_ws_slot,
+    enforce_rate_limit,
+    enforce_write_rate_limit,
+    get_db,
+    release_ws_slot,
+)
 from app.api.translate import reload_pipeline
+from app.config import get_settings
 from app.database import SessionLocal
 from app.ml.utils import estimate_remaining_time
-from app.schemas.training import TrainingConfig, TrainingMetrics, TrainingSession, TrainingSessionCreate
+from app.schemas.training import TrainingMetrics, TrainingSession, TrainingSessionCreate
 from app.services.model_service import ModelService
 from app.services.training_service import normalize_training_config, training_service
 
@@ -90,7 +97,12 @@ def _serialize_session(session) -> TrainingSession:
     )
 
 
-@router.post("/sessions", response_model=TrainingSession, status_code=status.HTTP_201_CREATED, dependencies=[Depends(enforce_rate_limit)])
+@router.post(
+    "/sessions",
+    response_model=TrainingSession,
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(enforce_rate_limit), Depends(enforce_write_rate_limit)],
+)
 def create_training_session(payload: TrainingSessionCreate, db: Session = Depends(get_db)) -> TrainingSession:
     """Queue a training session and start background execution."""
     if payload.mode == "few-shot" and payload.sign_id is None:
@@ -119,7 +131,7 @@ def list_training_sessions(db: Session = Depends(get_db)) -> list[TrainingSessio
     return [_serialize_session(item) for item in sessions]
 
 
-@router.post("/sessions/{session_id}/stop", status_code=status.HTTP_202_ACCEPTED)
+@router.post("/sessions/{session_id}/stop", status_code=status.HTTP_202_ACCEPTED, dependencies=[Depends(enforce_write_rate_limit)])
 def stop_training_session(session_id: str, db: Session = Depends(get_db)) -> dict:
     """Stop a running training session."""
     session = training_service.get_session(db, session_id)
@@ -130,7 +142,7 @@ def stop_training_session(session_id: str, db: Session = Depends(get_db)) -> dic
     return {"status": "stopping"}
 
 
-@router.post("/sessions/{session_id}/deploy")
+@router.post("/sessions/{session_id}/deploy", dependencies=[Depends(enforce_write_rate_limit)])
 def deploy_training_session(session_id: str, db: Session = Depends(get_db)) -> dict:
     """Activate model produced by a completed training session."""
     session = training_service.get_session(db, session_id)
@@ -176,6 +188,14 @@ def deploy_training_session(session_id: str, db: Session = Depends(get_db)) -> d
 @router.websocket("/sessions/{session_id}/live")
 async def training_session_live(websocket: WebSocket, session_id: str) -> None:
     """Stream session metrics every 500ms over WebSocket."""
+    settings = get_settings()
+    slot_key = None
+    try:
+        slot_key = acquire_ws_slot(websocket, settings=settings, endpoint="training-live")
+    except HTTPException as exc:
+        await websocket.close(code=1013, reason=str(exc.detail))
+        return
+
     await websocket.accept()
 
     try:
@@ -203,3 +223,5 @@ async def training_session_live(websocket: WebSocket, session_id: str) -> None:
             await asyncio.sleep(0.5)
     except WebSocketDisconnect:
         return
+    finally:
+        release_ws_slot(slot_key)

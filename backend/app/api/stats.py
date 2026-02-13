@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 
 from fastapi import APIRouter, Depends, Query
 
-from app.api.deps import get_db
+from app.api.deps import enforce_rate_limit, get_db
 from app.models.model_version import ModelVersion
 from app.models.sign import Sign
 from app.models.training import TrainingSession
@@ -16,7 +16,7 @@ from app.models.video import Video
 router = APIRouter()
 
 
-@router.get("/overview")
+@router.get("/overview", dependencies=[Depends(enforce_rate_limit)])
 def stats_overview(db: Session = Depends(get_db)) -> dict:
     """Return global KPIs for dashboard."""
     total_signs = db.scalar(select(func.count()).select_from(Sign)) or 0
@@ -42,7 +42,7 @@ def stats_overview(db: Session = Depends(get_db)) -> dict:
     }
 
 
-@router.get("/accuracy-history")
+@router.get("/accuracy-history", dependencies=[Depends(enforce_rate_limit)])
 def stats_accuracy_history(
     limit: int = Query(default=50, ge=1, le=500),
     db: Session = Depends(get_db),
@@ -62,7 +62,7 @@ def stats_accuracy_history(
     ]
 
 
-@router.get("/signs-per-category")
+@router.get("/signs-per-category", dependencies=[Depends(enforce_rate_limit)])
 def stats_signs_per_category(db: Session = Depends(get_db)) -> list[dict]:
     """Return dictionary distribution grouped by category."""
     rows = db.execute(

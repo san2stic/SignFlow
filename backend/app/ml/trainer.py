@@ -645,7 +645,7 @@ def load_model_checkpoint(checkpoint_path: str | Path, device: str = "cpu") -> S
         raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
 
     try:
-        checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
+        checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=True)
 
         # Create model with saved architecture.
         model = SignTransformer(

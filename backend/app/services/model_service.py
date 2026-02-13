@@ -21,15 +21,32 @@ from app.schemas.model_version import (
 class ModelService:
     """Handles model artifact metadata and active-version switching."""
 
+    @staticmethod
+    def _to_public_schema(model: ModelVersion) -> ModelVersionSchema:
+        """Return a public-safe model schema without absolute filesystem leakage."""
+        return ModelVersionSchema(
+            id=model.id,
+            version=model.version,
+            is_active=model.is_active,
+            num_classes=model.num_classes,
+            accuracy=model.accuracy,
+            class_labels=model.class_labels or [],
+            training_session_id=model.training_session_id,
+            file_path=Path(model.file_path).name,
+            file_size_mb=model.file_size_mb,
+            created_at=model.created_at,
+            parent_version=model.parent_version,
+        )
+
     def list_models(self, db: Session) -> list[ModelVersionSchema]:
         """Return all model versions ordered by creation timestamp descending."""
         models = db.scalars(select(ModelVersion).order_by(ModelVersion.created_at.desc())).all()
-        return [ModelVersionSchema.model_validate(model) for model in models]
+        return [self._to_public_schema(model) for model in models]
 
     def get_active_model(self, db: Session) -> ModelVersionSchema | None:
         """Return currently active model version, if any."""
         model = db.scalar(select(ModelVersion).where(ModelVersion.is_active.is_(True)))
-        return ModelVersionSchema.model_validate(model) if model else None
+        return self._to_public_schema(model) if model else None
 
     def activate(self, db: Session, model_id: str) -> ModelVersionActivateResponse:
         """Set target model as active and deactivate others."""
@@ -62,4 +79,9 @@ class ModelService:
         else:
             out_path.write_text("placeholder model artifact", encoding="utf-8")
 
-        return ModelVersionExportResponse(model_id=model.id, version=model.version, format=fmt, path=str(out_path))
+        return ModelVersionExportResponse(
+            model_id=model.id,
+            version=model.version,
+            format=fmt,
+            path=out_path.name,
+        )

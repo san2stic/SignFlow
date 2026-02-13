@@ -2,6 +2,10 @@ services:
   caddy:
     image: caddy:2-alpine
     restart: unless-stopped
+    environment:
+      - SIGNFLOW_DOMAIN=${SIGNFLOW_DOMAIN:-localhost}
+      - SIGNFLOW_BASIC_AUTH_USER=${SIGNFLOW_BASIC_AUTH_USER:?Set SIGNFLOW_BASIC_AUTH_USER}
+      - SIGNFLOW_BASIC_AUTH_PASSWORD_HASH=${SIGNFLOW_BASIC_AUTH_PASSWORD_HASH:?Set SIGNFLOW_BASIC_AUTH_PASSWORD_HASH}
     ports:
       - "80:80"
       - "443:443"
@@ -27,12 +31,19 @@ services:
       - ./backend/data:/app/data
     environment:
       - ENV=production
-      - DATABASE_URL=postgresql+psycopg://signflow:signflow@db:5432/signflow
-      - REDIS_URL=redis://redis:6379/0
+      - DATABASE_URL=postgresql+psycopg://${POSTGRES_USER:-signflow}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-signflow}
+      - REDIS_URL=redis://:${REDIS_PASSWORD:?Set REDIS_PASSWORD}@redis:6379/0
       - MODEL_DIR=/app/data/models
       - VIDEO_DIR=/app/data/videos
       - EXPORT_DIR=/app/data/exports
       - CORS_ORIGINS=https://${SIGNFLOW_DOMAIN:-localhost},http://${SIGNFLOW_DOMAIN:-localhost}
+      - TRUSTED_HOSTS=${SIGNFLOW_DOMAIN:-localhost},localhost,127.0.0.1,testserver,backend
+      - ENABLE_DOCS=false
+      - MAX_REQUEST_MB=64
+      - MAX_DICTIONARY_IMPORT_MB=30
+      - WRITE_RATE_LIMIT_PER_MINUTE=40
+      - WS_MAX_CONNECTIONS_PER_IP=3
+      - WS_MESSAGES_PER_MINUTE=900
       - TRAINING_USE_CELERY=true
     depends_on:
       - db
@@ -42,14 +53,15 @@ services:
     image: postgres:16-alpine
     restart: unless-stopped
     environment:
-      - POSTGRES_DB=signflow
-      - POSTGRES_USER=signflow
-      - POSTGRES_PASSWORD=signflow
+      - POSTGRES_DB=${POSTGRES_DB:-signflow}
+      - POSTGRES_USER=${POSTGRES_USER:-signflow}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}
     volumes:
       - pgdata:/var/lib/postgresql/data
 
   redis:
     image: redis:7-alpine
+    command: redis-server --save 60 1000 --appendonly yes --requirepass ${REDIS_PASSWORD:?Set REDIS_PASSWORD}
     restart: unless-stopped
 
   celery_worker:
@@ -60,11 +72,18 @@ services:
       - ./backend/data:/app/data
     environment:
       - ENV=production
-      - DATABASE_URL=postgresql+psycopg://signflow:signflow@db:5432/signflow
-      - REDIS_URL=redis://redis:6379/0
+      - DATABASE_URL=postgresql+psycopg://${POSTGRES_USER:-signflow}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-signflow}
+      - REDIS_URL=redis://:${REDIS_PASSWORD:?Set REDIS_PASSWORD}@redis:6379/0
       - MODEL_DIR=/app/data/models
       - VIDEO_DIR=/app/data/videos
       - EXPORT_DIR=/app/data/exports
+      - TRUSTED_HOSTS=${SIGNFLOW_DOMAIN:-localhost},localhost,127.0.0.1,testserver,backend
+      - ENABLE_DOCS=false
+      - MAX_REQUEST_MB=64
+      - MAX_DICTIONARY_IMPORT_MB=30
+      - WRITE_RATE_LIMIT_PER_MINUTE=40
+      - WS_MAX_CONNECTIONS_PER_IP=3
+      - WS_MESSAGES_PER_MINUTE=900
       - TRAINING_USE_CELERY=true
     depends_on:
       - db

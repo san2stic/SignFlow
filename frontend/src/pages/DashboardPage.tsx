@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Bar, BarChart, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
+import { motion } from "framer-motion";
 
 import { exportDictionary, importDictionary } from "../api/dictionary";
 import { activateModel, exportModel, listModels, type ModelVersion } from "../api/models";
@@ -16,6 +17,21 @@ function downloadBlob(filename: string, blob: Blob): void {
   anchor.remove();
   URL.revokeObjectURL(url);
 }
+
+const containerVariants = {
+  hidden: { opacity: 0 },
+  show: {
+    opacity: 1,
+    transition: {
+      staggerChildren: 0.1
+    }
+  }
+};
+
+const itemVariants = {
+  hidden: { opacity: 0, y: 20 },
+  show: { opacity: 1, y: 0 }
+};
 
 export function DashboardPage(): JSX.Element {
   const [overview, setOverview] = useState<OverviewStats | null>(null);
@@ -55,10 +71,10 @@ export function DashboardPage(): JSX.Element {
     setError(null);
     try {
       await activateModel(modelId);
-      setStatus("Model activated.");
+      setStatus("Modèle activé avec succès.");
       await refresh();
     } catch (activateError) {
-      setError(activateError instanceof Error ? activateError.message : "Activation failed.");
+      setError(activateError instanceof Error ? activateError.message : "Échec de l'activation.");
     } finally {
       setActivatingModelId(null);
     }
@@ -70,9 +86,9 @@ export function DashboardPage(): JSX.Element {
     try {
       const blob = await exportDictionary(format);
       downloadBlob(`signflow-dictionary-${format}.zip`, blob);
-      setStatus(`Dictionary exported as ${format}.`);
+      setStatus(`Dictionnaire exporté au format ${format}.`);
     } catch (exportError) {
-      setError(exportError instanceof Error ? exportError.message : "Dictionary export failed.");
+      setError(exportError instanceof Error ? exportError.message : "Échec de l'export du dictionnaire.");
     } finally {
       setIsBusy(false);
     }
@@ -84,14 +100,14 @@ export function DashboardPage(): JSX.Element {
     try {
       const result = await importDictionary(file);
       setStatus(
-        `Dictionary import: ${result.imported_signs} signs imported, ${result.imported_notes} notes imported, ${result.skipped} skipped.`
+        `Import : ${result.imported_signs} signes, ${result.imported_notes} notes, ${result.skipped} ignorés.`
       );
       if (result.errors.length > 0) {
         setError(result.errors.join(" | "));
       }
       await refresh();
     } catch (importError) {
-      setError(importError instanceof Error ? importError.message : "Dictionary import failed.");
+      setError(importError instanceof Error ? importError.message : "Échec de l'import du dictionnaire.");
     } finally {
       setIsBusy(false);
     }
@@ -99,7 +115,7 @@ export function DashboardPage(): JSX.Element {
 
   const onExportModel = async (): Promise<void> => {
     if (!activeModel) {
-      setError("No active model to export.");
+      setError("Aucun modèle actif à exporter.");
       return;
     }
 
@@ -107,118 +123,379 @@ export function DashboardPage(): JSX.Element {
     setError(null);
     try {
       const result = await exportModel(activeModel.id, "pt");
-      setStatus(`Model export generated at: ${result.path}`);
+      setStatus(`Export du modèle généré : ${result.path}`);
     } catch (exportError) {
-      setError(exportError instanceof Error ? exportError.message : "Model export failed.");
+      setError(exportError instanceof Error ? exportError.message : "Échec de l'export du modèle.");
     } finally {
       setIsBusy(false);
     }
   };
 
   return (
-    <section className="space-y-4">
-      <h1 className="font-heading text-2xl">Dashboard</h1>
-
-      {status && <p className="rounded-btn border border-secondary/40 bg-secondary/10 px-3 py-2 text-sm text-secondary">{status}</p>}
-      {error && <p className="rounded-btn border border-red-500/40 bg-red-500/10 px-3 py-2 text-sm text-red-200">{error}</p>}
-
-      <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
-        <Kpi label="Signs" value={overview?.total_signs ?? 0} />
-        <Kpi label="Videos" value={overview?.total_videos ?? 0} />
-        <Kpi label="Accuracy" value={`${Math.round((overview?.model_accuracy ?? 0) * 100)}%`} />
-        <Kpi label="Translations" value={overview?.total_translations ?? 0} />
+    <motion.section
+      variants={containerVariants}
+      initial="hidden"
+      animate="show"
+      className="relative space-y-6 pb-8"
+    >
+      {/* Animated background orbs */}
+      <div className="pointer-events-none fixed inset-0 overflow-hidden opacity-20">
+        <motion.div
+          className="absolute top-1/4 left-1/4 h-96 w-96 rounded-full bg-primary blur-3xl"
+          animate={{
+            x: [0, 50, 0],
+            y: [0, -30, 0],
+            scale: [1, 1.1, 1]
+          }}
+          transition={{
+            duration: 15,
+            repeat: Infinity,
+            ease: "easeInOut"
+          }}
+        />
+        <motion.div
+          className="absolute bottom-1/4 right-1/4 h-96 w-96 rounded-full bg-secondary blur-3xl"
+          animate={{
+            x: [0, -60, 0],
+            y: [0, 40, 0],
+            scale: [1, 1.2, 1]
+          }}
+          transition={{
+            duration: 18,
+            repeat: Infinity,
+            ease: "easeInOut"
+          }}
+        />
       </div>
 
-      <div className="card space-y-2 p-4">
-        <h2 className="font-heading text-lg">Model Accuracy Over Time</h2>
+      {/* Header */}
+      <motion.header variants={itemVariants} className="flex items-center gap-4">
+        <div className="h-12 w-12 rounded-xl bg-gradient-to-br from-primary to-secondary p-[2px]">
+          <div className="flex h-full w-full items-center justify-center rounded-xl bg-background-elevated">
+            <svg className="h-6 w-6 text-primary" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
+            </svg>
+          </div>
+        </div>
+        <h1 className="font-display text-3xl font-bold tracking-tight">
+          <span className="glow-text bg-gradient-to-r from-primary to-secondary bg-clip-text text-transparent">
+            Tableau de bord
+          </span>
+        </h1>
+      </motion.header>
+
+      {/* Status messages */}
+      {status && (
+        <motion.div
+          initial={{ opacity: 0, y: -10 }}
+          animate={{ opacity: 1, y: 0 }}
+          exit={{ opacity: 0 }}
+          className="card neon-border p-4"
+        >
+          <div className="flex items-center gap-3">
+            <div className="h-2 w-2 animate-pulse rounded-full bg-accent shadow-glow" />
+            <p className="text-sm text-accent">{status}</p>
+          </div>
+        </motion.div>
+      )}
+
+      {error && (
+        <motion.div
+          initial={{ opacity: 0, y: -10 }}
+          animate={{ opacity: 1, y: 0 }}
+          exit={{ opacity: 0 }}
+          className="card border-red-500/30 p-4"
+        >
+          <div className="flex items-center gap-3">
+            <svg className="h-5 w-5 text-red-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+            </svg>
+            <p className="text-sm text-red-300">{error}</p>
+          </div>
+        </motion.div>
+      )}
+
+      {/* KPI Cards */}
+      <motion.div
+        variants={itemVariants}
+        className="grid grid-cols-2 gap-4 md:grid-cols-4"
+      >
+        <KpiCard
+          icon={
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 8h10M7 12h4m1 8l-4-4H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-3l-4 4z" />
+          }
+          label="Signes"
+          value={overview?.total_signs ?? 0}
+          gradient="from-primary to-primary-dark"
+        />
+        <KpiCard
+          icon={
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" />
+          }
+          label="Vidéos"
+          value={overview?.total_videos ?? 0}
+          gradient="from-secondary to-secondary-dark"
+        />
+        <KpiCard
+          icon={
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+          }
+          label="Précision"
+          value={`${Math.round((overview?.model_accuracy ?? 0) * 100)}%`}
+          gradient="from-accent to-accent-dark"
+        />
+        <KpiCard
+          icon={
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
+          }
+          label="Traductions"
+          value={overview?.total_translations ?? 0}
+          gradient="from-primary to-secondary"
+        />
+      </motion.div>
+
+      {/* Accuracy History Chart */}
+      <motion.div variants={itemVariants} className="card p-6">
+        <div className="mb-6 flex items-center gap-3">
+          <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-gradient-to-br from-accent/20 to-accent-dark/20">
+            <svg className="h-5 w-5 text-accent" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6" />
+            </svg>
+          </div>
+          <h2 className="font-display text-xl font-semibold">Précision du modèle dans le temps</h2>
+        </div>
         {accuracyHistory.length === 0 ? (
-          <p className="text-sm text-slate-400">No model history yet.</p>
+          <div className="flex h-64 items-center justify-center">
+            <p className="text-sm text-text-muted">Aucun historique de modèle disponible.</p>
+          </div>
         ) : (
-          <ResponsiveContainer width="100%" height={240}>
+          <ResponsiveContainer width="100%" height={280}>
             <LineChart data={accuracyHistory}>
-              <XAxis dataKey="version" tick={{ fill: "#94a3b8", fontSize: 11 }} />
-              <YAxis domain={[0, 1]} tick={{ fill: "#94a3b8", fontSize: 11 }} />
-              <Tooltip
-                contentStyle={{ backgroundColor: "#0f172a", border: "1px solid #334155", borderRadius: 8 }}
-                labelStyle={{ color: "#94a3b8" }}
+              <defs>
+                <linearGradient id="accuracyGradient" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="0%" stopColor="#10B981" stopOpacity={0.3} />
+                  <stop offset="100%" stopColor="#10B981" stopOpacity={0} />
+                </linearGradient>
+              </defs>
+              <XAxis
+                dataKey="version"
+                tick={{ fill: "#94a3b8", fontSize: 12 }}
+                stroke="#334155"
+                strokeWidth={1}
               />
-              <Line type="monotone" dataKey="accuracy" stroke="#10b981" strokeWidth={2} dot />
+              <YAxis
+                domain={[0, 1]}
+                tick={{ fill: "#94a3b8", fontSize: 12 }}
+                stroke="#334155"
+                strokeWidth={1}
+              />
+              <Tooltip
+                contentStyle={{
+                  backgroundColor: "rgba(15, 23, 42, 0.95)",
+                  border: "1px solid rgba(14, 165, 233, 0.3)",
+                  borderRadius: "12px",
+                  backdropFilter: "blur(12px)"
+                }}
+                labelStyle={{ color: "#CBD5E1", fontWeight: 600 }}
+                itemStyle={{ color: "#10B981" }}
+              />
+              <Line
+                type="monotone"
+                dataKey="accuracy"
+                stroke="#10B981"
+                strokeWidth={3}
+                dot={{ fill: "#10B981", r: 5, strokeWidth: 2, stroke: "#020617" }}
+                activeDot={{ r: 7, strokeWidth: 2 }}
+                fill="url(#accuracyGradient)"
+              />
             </LineChart>
           </ResponsiveContainer>
         )}
-      </div>
+      </motion.div>
 
-      <div className="card space-y-2 p-4">
-        <h2 className="font-heading text-lg">Signs Per Category</h2>
+      {/* Signs Per Category Chart */}
+      <motion.div variants={itemVariants} className="card p-6">
+        <div className="mb-6 flex items-center gap-3">
+          <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-gradient-to-br from-primary/20 to-secondary/20">
+            <svg className="h-5 w-5 text-primary" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
+            </svg>
+          </div>
+          <h2 className="font-display text-xl font-semibold">Signes par catégorie</h2>
+        </div>
         {categoryCounts.length === 0 ? (
-          <p className="text-sm text-slate-400">No category stats yet.</p>
+          <div className="flex h-64 items-center justify-center">
+            <p className="text-sm text-text-muted">Aucune statistique de catégorie disponible.</p>
+          </div>
         ) : (
-          <ResponsiveContainer width="100%" height={240}>
+          <ResponsiveContainer width="100%" height={280}>
             <BarChart data={categoryCounts}>
-              <XAxis dataKey="category" tick={{ fill: "#94a3b8", fontSize: 11 }} />
-              <YAxis tick={{ fill: "#94a3b8", fontSize: 11 }} />
-              <Tooltip
-                contentStyle={{ backgroundColor: "#0f172a", border: "1px solid #334155", borderRadius: 8 }}
-                labelStyle={{ color: "#94a3b8" }}
+              <defs>
+                <linearGradient id="barGradient" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="0%" stopColor="#0EA5E9" />
+                  <stop offset="100%" stopColor="#8B5CF6" />
+                </linearGradient>
+              </defs>
+              <XAxis
+                dataKey="category"
+                tick={{ fill: "#94a3b8", fontSize: 12 }}
+                stroke="#334155"
+                strokeWidth={1}
               />
-              <Bar dataKey="count" fill="#6366f1" radius={[6, 6, 0, 0]} />
+              <YAxis
+                tick={{ fill: "#94a3b8", fontSize: 12 }}
+                stroke="#334155"
+                strokeWidth={1}
+              />
+              <Tooltip
+                contentStyle={{
+                  backgroundColor: "rgba(15, 23, 42, 0.95)",
+                  border: "1px solid rgba(14, 165, 233, 0.3)",
+                  borderRadius: "12px",
+                  backdropFilter: "blur(12px)"
+                }}
+                labelStyle={{ color: "#CBD5E1", fontWeight: 600 }}
+                itemStyle={{ color: "#0EA5E9" }}
+              />
+              <Bar
+                dataKey="count"
+                fill="url(#barGradient)"
+                radius={[8, 8, 0, 0]}
+              />
             </BarChart>
           </ResponsiveContainer>
         )}
-      </div>
+      </motion.div>
 
-      <div className="card p-4">
-        <h2 className="font-heading text-lg">Model Versions</h2>
-        <ul className="mt-3 space-y-2 text-sm">
-          {models.map((model) => (
-            <li key={model.id} className="flex items-center justify-between rounded-btn bg-slate-800/60 px-3 py-2">
-              <span>
-                {model.version} {model.is_active ? "(active)" : ""}
-              </span>
-              <div className="flex items-center gap-2">
-                <span className="font-mono text-xs">{Math.round(model.accuracy * 100)}%</span>
-                {!model.is_active && (
-                  <button
-                    className="rounded-btn bg-primary px-2 py-1 text-xs text-white disabled:bg-slate-700"
-                    disabled={activatingModelId === model.id}
-                    onClick={() => {
-                      void onActivateModel(model.id);
-                    }}
-                  >
-                    {activatingModelId === model.id ? "..." : "Activate"}
-                  </button>
-                )}
+      {/* Model Versions */}
+      <motion.div variants={itemVariants} className="card p-6">
+        <div className="mb-4 flex items-center gap-3">
+          <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-gradient-to-br from-secondary/20 to-primary/20">
+            <svg className="h-5 w-5 text-secondary" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 3v2m6-2v2M9 19v2m6-2v2M5 9H3m2 6H3m18-6h-2m2 6h-2M7 19h10a2 2 0 002-2V7a2 2 0 00-2-2H7a2 2 0 00-2 2v10a2 2 0 002 2zM9 9h6v6H9V9z" />
+            </svg>
+          </div>
+          <h2 className="font-display text-xl font-semibold">Versions du modèle</h2>
+        </div>
+        <ul className="space-y-3">
+          {models.map((model, index) => (
+            <motion.li
+              key={model.id}
+              initial={{ opacity: 0, x: -20 }}
+              animate={{ opacity: 1, x: 0 }}
+              transition={{ delay: index * 0.05 }}
+              className="card flex items-center justify-between p-4 transition-all hover:scale-[1.01]"
+            >
+              <div className="flex items-center gap-3">
+                <div className={`h-10 w-10 rounded-lg bg-gradient-to-br ${model.is_active ? 'from-accent to-accent-dark' : 'from-surface-secondary to-surface-tertiary'} flex items-center justify-center`}>
+                  <span className="font-mono text-sm font-bold">{model.version}</span>
+                </div>
+                <div>
+                  <p className="font-medium">
+                    {model.version}
+                    {model.is_active && (
+                      <span className="ml-2 rounded-full bg-accent/20 px-2 py-0.5 text-xs font-medium text-accent">
+                        ACTIF
+                      </span>
+                    )}
+                  </p>
+                  <p className="text-xs text-text-tertiary">
+                    Précision : <span className="font-mono text-primary">{Math.round(model.accuracy * 100)}%</span>
+                  </p>
+                </div>
               </div>
-            </li>
+              {!model.is_active && (
+                <button
+                  className="touch-btn bg-gradient-to-br from-primary/30 to-secondary/30 text-primary backdrop-blur-sm disabled:opacity-50"
+                  disabled={activatingModelId === model.id}
+                  onClick={() => {
+                    void onActivateModel(model.id);
+                  }}
+                >
+                  {activatingModelId === model.id ? "..." : "Activer"}
+                </button>
+              )}
+            </motion.li>
           ))}
         </ul>
-      </div>
+      </motion.div>
 
-      <div className="card p-4">
-        <h2 className="font-heading text-lg">Recent Trainings</h2>
-        <ul className="mt-2 space-y-2 text-sm">
+      {/* Recent Trainings */}
+      <motion.div variants={itemVariants} className="card p-6">
+        <div className="mb-4 flex items-center gap-3">
+          <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-gradient-to-br from-primary/20 to-accent/20">
+            <svg className="h-5 w-5 text-primary" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+            </svg>
+          </div>
+          <h2 className="font-display text-xl font-semibold">Entraînements récents</h2>
+        </div>
+        <ul className="space-y-2">
           {sessions.length === 0 ? (
-            <li className="text-slate-400">No sessions yet.</li>
+            <li className="py-4 text-center text-sm text-text-muted">Aucune session pour le moment.</li>
           ) : (
-            sessions.map((session) => (
-              <li key={session.id} className="flex items-center justify-between">
-                <span className="truncate">{session.mode}</span>
-                <span className="rounded-full bg-slate-700 px-2 py-1 text-xs">{session.status}</span>
-              </li>
+            sessions.map((session, index) => (
+              <motion.li
+                key={session.id}
+                initial={{ opacity: 0, x: -20 }}
+                animate={{ opacity: 1, x: 0 }}
+                transition={{ delay: index * 0.03 }}
+                className="flex items-center justify-between rounded-btn bg-surface-secondary/50 px-4 py-3"
+              >
+                <span className="truncate text-sm font-medium">{session.mode}</span>
+                <span className={`rounded-full px-3 py-1 text-xs font-medium ${
+                  session.status === "completed"
+                    ? "bg-accent/20 text-accent"
+                    : session.status === "failed"
+                    ? "bg-red-500/20 text-red-400"
+                    : "bg-primary/20 text-primary"
+                }`}>
+                  {session.status}
+                </span>
+              </motion.li>
             ))
           )}
         </ul>
-      </div>
+      </motion.div>
 
-      <div className="grid gap-2 sm:grid-cols-2">
-        <button className="touch-btn bg-slate-700 text-white disabled:opacity-60" disabled={isBusy} onClick={() => void onExportDictionary("json")}>
-          Export Dict (JSON)
+      {/* Action Buttons */}
+      <motion.div
+        variants={itemVariants}
+        className="grid gap-3 sm:grid-cols-2"
+      >
+        <button
+          className="touch-btn bg-gradient-to-br from-primary/30 to-secondary/30 text-primary backdrop-blur-sm disabled:opacity-50"
+          disabled={isBusy}
+          onClick={() => void onExportDictionary("json")}
+        >
+          <span className="flex items-center justify-center gap-2">
+            <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+            </svg>
+            Export Dict (JSON)
+          </span>
         </button>
-        <button className="touch-btn bg-slate-700 text-white disabled:opacity-60" disabled={isBusy} onClick={() => void onExportDictionary("obsidian-vault")}>
-          Export Dict (Obsidian)
+
+        <button
+          className="touch-btn bg-gradient-to-br from-primary/30 to-secondary/30 text-primary backdrop-blur-sm disabled:opacity-50"
+          disabled={isBusy}
+          onClick={() => void onExportDictionary("obsidian-vault")}
+        >
+          <span className="flex items-center justify-center gap-2">
+            <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+            </svg>
+            Export Dict (Obsidian)
+          </span>
         </button>
-        <label className="touch-btn cursor-pointer bg-slate-700 text-white disabled:opacity-60">
-          Import Dict
+
+        <label className="touch-btn cursor-pointer bg-gradient-to-br from-accent/30 to-accent-dark/30 text-accent backdrop-blur-sm disabled:opacity-50">
+          <span className="flex items-center justify-center gap-2">
+            <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
+            </svg>
+            Import Dict
+          </span>
           <input
             type="file"
             className="hidden"
@@ -232,19 +509,51 @@ export function DashboardPage(): JSX.Element {
             }}
           />
         </label>
-        <button className="touch-btn bg-primary text-white disabled:opacity-60" disabled={isBusy || !activeModel} onClick={() => void onExportModel()}>
-          Export Active Model
+
+        <button
+          className="touch-btn bg-gradient-to-br from-primary to-secondary text-white disabled:opacity-50"
+          disabled={isBusy || !activeModel}
+          onClick={() => void onExportModel()}
+        >
+          <span className="flex items-center justify-center gap-2">
+            <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7H5a2 2 0 00-2 2v9a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-3m-1 4l-3 3m0 0l-3-3m3 3V4" />
+            </svg>
+            Export Modèle Actif
+          </span>
         </button>
-      </div>
-    </section>
+      </motion.div>
+    </motion.section>
   );
 }
 
-function Kpi({ label, value }: { label: string; value: string | number }): JSX.Element {
+interface KpiCardProps {
+  icon: React.ReactNode;
+  label: string;
+  value: string | number;
+  gradient: string;
+}
+
+function KpiCard({ icon, label, value, gradient }: KpiCardProps): JSX.Element {
   return (
-    <article className="card p-4">
-      <p className="text-xs text-slate-400">{label}</p>
-      <p className="font-heading text-2xl">{value}</p>
-    </article>
+    <motion.article
+      whileHover={{ scale: 1.03, y: -4 }}
+      className="card relative overflow-hidden p-6"
+    >
+      {/* Background gradient blob */}
+      <div className={`pointer-events-none absolute -top-10 -right-10 h-32 w-32 rounded-full bg-gradient-to-br ${gradient} opacity-20 blur-2xl`} />
+
+      <div className="relative z-10">
+        <div className={`mb-4 flex h-12 w-12 items-center justify-center rounded-xl bg-gradient-to-br ${gradient} p-[2px]`}>
+          <div className="flex h-full w-full items-center justify-center rounded-xl bg-background-card">
+            <svg className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              {icon}
+            </svg>
+          </div>
+        </div>
+        <p className="mb-1 text-xs font-medium uppercase tracking-wider text-text-tertiary">{label}</p>
+        <p className="font-display text-3xl font-bold tracking-tight">{value}</p>
+      </div>
+    </motion.article>
   );
 }

@@ -8,8 +8,8 @@ services:
       - ./backend/data:/app/data
       - ./backend/app:/app/app
     environment:
-      - DATABASE_URL=postgresql+psycopg://signflow:signflow@db:5432/signflow
-      - REDIS_URL=redis://redis:6379/0
+      - DATABASE_URL=postgresql+psycopg://${POSTGRES_USER:-signflow}:${POSTGRES_PASSWORD:-signflow}@db:5432/${POSTGRES_DB:-signflow}
+      - REDIS_URL=redis://:${REDIS_PASSWORD:-signflow-dev}@redis:6379/0
       - MODEL_DIR=/app/data/models
       - VIDEO_DIR=/app/data/videos
       - EXPORT_DIR=/app/data/exports
@@ -36,14 +36,15 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
     environment:
-      - POSTGRES_DB=signflow
-      - POSTGRES_USER=signflow
-      - POSTGRES_PASSWORD=signflow
+      - POSTGRES_DB=${POSTGRES_DB:-signflow}
+      - POSTGRES_USER=${POSTGRES_USER:-signflow}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-signflow}
     ports:
       - "5432:5432"
 
   redis:
     image: redis:7-alpine
+    command: redis-server --save 60 1000 --appendonly yes --requirepass ${REDIS_PASSWORD:-signflow-dev}
     ports:
       - "6379:6379"
 
@@ -54,8 +55,8 @@ services:
       - ./backend/data:/app/data
       - ./backend/app:/app/app
     environment:
-      - DATABASE_URL=postgresql+psycopg://signflow:signflow@db:5432/signflow
-      - REDIS_URL=redis://redis:6379/0
+      - DATABASE_URL=postgresql+psycopg://${POSTGRES_USER:-signflow}:${POSTGRES_PASSWORD:-signflow}@db:5432/${POSTGRES_DB:-signflow}
+      - REDIS_URL=redis://:${REDIS_PASSWORD:-signflow-dev}@redis:6379/0
       - MODEL_DIR=/app/data/models
       - VIDEO_DIR=/app/data/videos
       - EXPORT_DIR=/app/data/exports

@@ -102,7 +102,7 @@ def prepare_few_shot_model(
     loaded_from_checkpoint = False
 
     if checkpoint_path and Path(checkpoint_path).exists():
-        checkpoint = torch.load(Path(checkpoint_path), map_location=device, weights_only=False)
+        checkpoint = torch.load(Path(checkpoint_path), map_location=device, weights_only=True)
         model = SignTransformer(
             num_features=checkpoint.get("num_features", num_features),
             num_classes=checkpoint.get("num_classes", num_classes),

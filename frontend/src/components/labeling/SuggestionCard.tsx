@@ -1,4 +1,5 @@
 import { SuggestedVideo } from "../../api/videos";
+import { apiBaseUrl } from "../../api/client";
 
 interface SuggestionCardProps {
   video: SuggestedVideo;
@@ -32,7 +33,7 @@ export function SuggestionCard({ video, isSelected, onToggleSelect }: Suggestion
       <div className="aspect-video bg-slate-800 rounded-t-lg overflow-hidden">
         {video.thumbnail_path ? (
           <img
-            src={`http://localhost:8000${video.thumbnail_path}`}
+            src={`${apiBaseUrl()}${video.thumbnail_path}`}
             alt="Video thumbnail"
             className="w-full h-full object-cover"
           />
