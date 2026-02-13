@@ -30,6 +30,33 @@ def _flatten(points: list[list[float]], expected_len: int) -> list[float]:
     return values[:target_size]
 
 
+def _safe_norm(vector: np.ndarray) -> float:
+    """Return stable vector norm."""
+    return float(np.linalg.norm(vector)) if vector.size else 0.0
+
+
+def _resolve_body_scale(pose_xyz: np.ndarray) -> float:
+    """
+    Estimate body scale to normalize signer size and camera distance.
+
+    Uses shoulder and hip distances as robust anchors.
+    """
+    if pose_xyz.shape[0] < 25:
+        return 1.0
+
+    shoulder_left = pose_xyz[11]
+    shoulder_right = pose_xyz[12]
+    hip_left = pose_xyz[23]
+    hip_right = pose_xyz[24]
+    shoulder_width = _safe_norm(shoulder_left - shoulder_right)
+    hip_width = _safe_norm(hip_left - hip_right)
+    torso_height = _safe_norm((shoulder_left + shoulder_right) / 2.0 - (hip_left + hip_right) / 2.0)
+
+    # Keep values stable even when detections are partial/noisy.
+    scale = max(shoulder_width, hip_width, torso_height, 1e-3)
+    return scale
+
+
 def normalize_landmarks(frame: FrameLandmarks, include_face: bool = False) -> np.ndarray:
     """Normalize coordinates relative to hip center and return feature vector."""
     pose = _flatten(frame.pose, 33)
@@ -40,17 +67,20 @@ def normalize_landmarks(frame: FrameLandmarks, include_face: bool = False) -> np
     left = np.array(_flatten(frame.left_hand, 21)).reshape(-1, 3)
     right = np.array(_flatten(frame.right_hand, 21)).reshape(-1, 3)
     pose_vec = np.array(pose).reshape(-1, 3)
+    body_scale = _resolve_body_scale(pose_vec)
 
-    left = left - hip_center
-    right = right - hip_center
-    pose_vec = pose_vec - hip_center
+    left = (left - hip_center) / body_scale
+    right = (right - hip_center) / body_scale
+    pose_vec = (pose_vec - hip_center) / body_scale
 
     chunks = [left.reshape(-1), right.reshape(-1), pose_vec.reshape(-1)]
     if include_face:
         face = np.array(_flatten(frame.face or [], 468)).reshape(-1, 3)
-        chunks.append((face - hip_center).reshape(-1))
+        chunks.append(((face - hip_center) / body_scale).reshape(-1))
 
-    return np.concatenate(chunks).astype(np.float32)
+    normalized = np.concatenate(chunks).astype(np.float32)
+    normalized = np.nan_to_num(normalized, nan=0.0, posinf=0.0, neginf=0.0)
+    return np.clip(normalized, -5.0, 5.0)
 
 
 @dataclass
