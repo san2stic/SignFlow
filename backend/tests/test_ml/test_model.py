@@ -36,3 +36,33 @@ def test_masked_temporal_pool_falls_back_to_mean_when_all_frames_inactive() -> N
     expected = encoded.mean(dim=1)
 
     assert torch.allclose(pooled, expected)
+
+
+from app.ml.feature_engineering import ENRICHED_FEATURE_DIM
+
+
+def test_model_reduced_defaults():
+    """New defaults should create a smaller model."""
+    model = SignTransformer(num_classes=5)
+    assert model.d_model == 128
+    assert model.nhead == 4
+    assert model.num_layers == 2
+    assert model.num_features == ENRICHED_FEATURE_DIM
+
+
+def test_model_forward_with_enriched_features():
+    """Model should handle enriched feature dimension."""
+    model = SignTransformer(num_classes=5)
+    x = torch.randn(2, 64, ENRICHED_FEATURE_DIM)
+    logits = model(x)
+    assert logits.shape == (2, 5)
+
+
+def test_model_old_config_still_works():
+    """Explicit old-style config should still work."""
+    model = SignTransformer(
+        num_features=225, num_classes=3, d_model=256, nhead=8, num_layers=4
+    )
+    x = torch.randn(1, 30, 225)
+    logits = model(x)
+    assert logits.shape == (1, 3)
