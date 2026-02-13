@@ -87,19 +87,87 @@ class TrainingService:
         for class_indices in by_label.values():
             shuffled = np.array(class_indices, dtype=np.int64)
             rng.shuffle(shuffled)
-            val_count = max(1, int(len(shuffled) * val_ratio)) if len(shuffled) > 1 else 1
-            val_count = min(val_count, max(1, len(shuffled) - 1)) if len(shuffled) > 1 else 1
+            if len(shuffled) == 1:
+                # Keep singleton classes in train split; they cannot be both train + val.
+                train_indices.extend(shuffled.tolist())
+                continue
+
+            val_count = max(1, int(len(shuffled) * val_ratio))
+            val_count = min(val_count, max(1, len(shuffled) - 1))
             val_indices.extend(shuffled[:val_count].tolist())
             train_indices.extend(shuffled[val_count:].tolist())
 
         # Guard against degenerate splits.
-        if not train_indices:
-            train_indices, val_indices = val_indices[:-1], val_indices[-1:]
-        if not val_indices:
+        if not train_indices and val_indices:
+            train_indices.append(val_indices.pop())
+
+        if not val_indices and len(train_indices) > 1:
+            # Prefer moving a sample from a class with >1 train samples to keep coverage.
+            by_label_train: dict[int, list[int]] = defaultdict(list)
+            for index in train_indices:
+                by_label_train[int(labels[index])].append(index)
+
+            moved_index: int | None = None
+            for class_train_indices in by_label_train.values():
+                if len(class_train_indices) > 1:
+                    moved_index = class_train_indices[-1]
+                    break
+
+            if moved_index is None:
+                moved_index = train_indices[-1]
+
+            train_indices.remove(moved_index)
+            val_indices.append(moved_index)
+
+        if not val_indices and train_indices:
+            # Final fallback for ultra-small datasets (e.g., one single sample).
             val_indices = train_indices[:1]
-            train_indices = train_indices[1:] if len(train_indices) > 1 else train_indices
 
         return np.array(train_indices, dtype=np.int64), np.array(val_indices, dtype=np.int64)
+
+    @staticmethod
+    def _split_and_prepare_sequences(
+        sequences: list[np.ndarray],
+        labels: list[int],
+        *,
+        val_ratio: float = 0.2,
+        apply_augmentation: bool = True,
+        num_augmentations_per_sample: int = 5,
+        augmentation_probability: float = 0.5,
+    ) -> tuple[list[np.ndarray], list[int], list[np.ndarray], list[int]]:
+        """
+        Split dataset first, then augment train split only.
+
+        This avoids validation leakage where augmented variants of one clip end up
+        in both train and validation, which can inflate validation accuracy.
+        """
+        if len(sequences) != len(labels):
+            raise ValueError("sequences and labels must have the same length")
+        if not sequences:
+            raise ValueError("No sequences available for splitting")
+
+        train_indices, val_indices = TrainingService._stratified_train_val_indices(
+            labels,
+            val_ratio=val_ratio,
+        )
+
+        train_sequences = [sequences[index] for index in train_indices.tolist()]
+        train_labels = [labels[index] for index in train_indices.tolist()]
+        val_sequences = [sequences[index] for index in val_indices.tolist()]
+        val_labels = [labels[index] for index in val_indices.tolist()]
+
+        if not train_sequences or not val_sequences:
+            raise ValueError("Could not build a valid train/validation split")
+
+        if apply_augmentation:
+            train_sequences, train_labels = augment_dataset(
+                train_sequences,
+                train_labels,
+                num_augmentations_per_sample=num_augmentations_per_sample,
+                augmentation_probability=augmentation_probability,
+            )
+
+        return train_sequences, train_labels, val_sequences, val_labels
 
     def _build_session_metrics(
         self,
@@ -333,22 +401,28 @@ class TrainingService:
                 class_labels = [item[0] for item in sorted(label_map.items(), key=lambda item: item[1])]
                 logger.info("data_loaded", num_samples=len(sequences), num_classes=num_classes)
 
-                # Apply data augmentation for all modes
-                if config.get("augmentation", True):
-                    logger.info("applying_data_augmentation", mode=mode)
-                    sequences, labels = augment_dataset(
-                        sequences,
-                        labels,
-                        num_augmentations_per_sample=5,
-                        augmentation_probability=0.5,
-                    )
-                    logger.info("augmentation_complete", total_samples=len(sequences))
+                # Split first, augment train only to avoid train/val leakage.
+                train_sequences, train_labels, val_sequences, val_labels = self._split_and_prepare_sequences(
+                    sequences,
+                    labels,
+                    val_ratio=0.2,
+                    apply_augmentation=bool(config.get("augmentation", True)),
+                    num_augmentations_per_sample=5,
+                    augmentation_probability=0.5,
+                )
+                logger.info(
+                    "dataset_split_ready",
+                    train_samples=len(train_sequences),
+                    val_samples=len(val_sequences),
+                    augmentation=bool(config.get("augmentation", True)),
+                )
 
-                # Create stratified train/val split.
-                train_indices, val_indices = self._stratified_train_val_indices(labels, val_ratio=0.2)
-
-                train_samples = [SignSample(sequences[i], labels[i]) for i in train_indices]
-                val_samples = [SignSample(sequences[i], labels[i]) for i in val_indices]
+                train_samples = [
+                    SignSample(sequence, label) for sequence, label in zip(train_sequences, train_labels)
+                ]
+                val_samples = [
+                    SignSample(sequence, label) for sequence, label in zip(val_sequences, val_labels)
+                ]
 
                 sequence_length = int(config.get("sequence_length", 64))
                 sequence_length = max(8, min(256, sequence_length))
