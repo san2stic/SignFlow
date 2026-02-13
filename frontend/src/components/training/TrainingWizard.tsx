@@ -79,7 +79,9 @@ export function TrainingWizard({ videoRef, cameraRef, initialAssignedSign }: Tra
     enabled: step === 2,
     targetFps: 30, // Increased from 8 to 30 for better landmark detection during recording
     includeFace: false,
-    modelComplexity: 2 // Use highest quality for best training data
+    modelComplexity: 2, // Use highest quality for best training data
+    minDetectionConfidence: 0.5,
+    minTrackingConfidence: 0.5
   });
 
   const visibleHands = countVisibleHands(frame);

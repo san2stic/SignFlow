@@ -28,6 +28,9 @@ interface ClipRecorderProps {
   frame?: LandmarkFrame | null;
 }
 
+const MIN_HAND_PRESENCE_RATIO = 0.35;
+const MIN_TRACKED_FRAMES = 8;
+
 function pickRecorderMimeType(): string | null {
   const candidates = [
     "video/mp4;codecs=avc1.42E01E,mp4a.40.2",
@@ -45,13 +48,20 @@ function pickRecorderMimeType(): string | null {
   return null;
 }
 
-function isCenteredFrame(frame: LandmarkFrame | null): boolean {
-  if (!frame) return false;
-  const points = [...frame.hands.left, ...frame.hands.right].filter((point) => point[0] !== 0 || point[1] !== 0);
-  if (points.length === 0) return false;
-  const centerX = points.reduce((sum, point) => sum + point[0], 0) / points.length;
-  const centerY = points.reduce((sum, point) => sum + point[1], 0) / points.length;
-  return centerX >= 0.2 && centerX <= 0.8 && centerY >= 0.15 && centerY <= 0.85;
+function hasVisibleHandPoints(points: number[][]): boolean {
+  return points.some((point) => point[0] !== 0 || point[1] !== 0 || point[2] !== 0);
+}
+
+function countVisibleHandsInFrame(frame: LandmarkFrame | null): number {
+  if (!frame) return 0;
+  let count = 0;
+  if (hasVisibleHandPoints(frame.hands.left)) {
+    count += 1;
+  }
+  if (hasVisibleHandPoints(frame.hands.right)) {
+    count += 1;
+  }
+  return count;
 }
 
 export function ClipRecorder({
@@ -72,8 +82,9 @@ export function ClipRecorder({
   const qualitySampleRef = useRef<number | null>(null);
   const startedAtRef = useRef<number>(0);
   const sampledFrameCountRef = useRef(0);
+  const trackedFrameCountRef = useRef(0);
+  const lastTrackedFrameIdxRef = useRef<number | null>(null);
   const handDetectedFrameCountRef = useRef(0);
-  const centeredFrameCountRef = useRef(0);
   const brightnessTotalRef = useRef(0);
   const brightnessSamplesRef = useRef(0);
   const visibleHandsRef = useRef(visibleHands);
@@ -114,12 +125,15 @@ export function ClipRecorder({
 
   const sampleQualityFrame = (): void => {
     sampledFrameCountRef.current += 1;
-    if (visibleHandsRef.current > 0) {
-      handDetectedFrameCountRef.current += 1;
+    const currentFrame = frameRef.current;
+    if (currentFrame && currentFrame.frame_idx !== lastTrackedFrameIdxRef.current) {
+      lastTrackedFrameIdxRef.current = currentFrame.frame_idx;
+      trackedFrameCountRef.current += 1;
+      if (countVisibleHandsInFrame(currentFrame) > 0 || visibleHandsRef.current > 0) {
+        handDetectedFrameCountRef.current += 1;
+      }
     }
-    if (isCenteredFrame(frameRef.current)) {
-      centeredFrameCountRef.current += 1;
-    }
+
     const brightness = measureBrightness();
     if (brightness !== null) {
       brightnessTotalRef.current += brightness;
@@ -163,8 +177,9 @@ export function ClipRecorder({
     chunksRef.current = [];
     startedAtRef.current = Date.now();
     sampledFrameCountRef.current = 0;
+    trackedFrameCountRef.current = 0;
+    lastTrackedFrameIdxRef.current = null;
     handDetectedFrameCountRef.current = 0;
-    centeredFrameCountRef.current = 0;
     brightnessTotalRef.current = 0;
     brightnessSamplesRef.current = 0;
     sampleQualityFrame();
@@ -190,17 +205,22 @@ export function ClipRecorder({
       const hasSufficientDuration = durationMs >= 2000;
       const hasEnoughData = file.size >= 20_000;
       const sampledFrames = sampledFrameCountRef.current;
+      const trackedFrames = trackedFrameCountRef.current;
       const framesWithHands = handDetectedFrameCountRef.current;
-      const centeredFrames = centeredFrameCountRef.current;
-      const handPresenceRatio = sampledFrames > 0 ? framesWithHands / sampledFrames : 0;
-      const centeredRatio = sampledFrames > 0 ? centeredFrames / sampledFrames : 0;
+      const handPresenceRatio = trackedFrames > 0 ? framesWithHands / trackedFrames : 0;
       const averageBrightness =
         brightnessSamplesRef.current > 0 ? brightnessTotalRef.current / brightnessSamplesRef.current : 0;
-      const hasVisibleHands = handPresenceRatio >= 0.8;
-      const isCentered = centeredRatio >= 0.7;
+      const hasEnoughTrackingData = trackedFrames >= MIN_TRACKED_FRAMES || sampledFrames <= MIN_TRACKED_FRAMES;
+      const hasVisibleHands = handPresenceRatio >= MIN_HAND_PRESENCE_RATIO;
       const hasEnoughLight = averageBrightness >= 45;
       const quality: "valid" | "low" =
-        hasSufficientDuration && hasEnoughData && hasVisibleHands && isCentered && hasEnoughLight ? "valid" : "low";
+        hasSufficientDuration &&
+        hasEnoughData &&
+        hasEnoughTrackingData &&
+        hasVisibleHands &&
+        hasEnoughLight
+          ? "valid"
+          : "low";
       const qualityReasons: string[] = [];
       if (!hasSufficientDuration) {
         qualityReasons.push("Clip too short (<2s)");
@@ -208,11 +228,11 @@ export function ClipRecorder({
       if (!hasEnoughData) {
         qualityReasons.push("Video quality too low");
       }
-      if (!hasVisibleHands) {
-        qualityReasons.push("At least one hand must be visible in >=80% of frames");
+      if (!hasEnoughTrackingData) {
+        qualityReasons.push("Tracking data is unstable, keep hands in frame a bit longer");
       }
-      if (!isCentered) {
-        qualityReasons.push("Gesture too often outside center frame");
+      if (!hasVisibleHands) {
+        qualityReasons.push(`At least one hand must be visible in >=${Math.round(MIN_HAND_PRESENCE_RATIO * 100)}% of frames`);
       }
       if (!hasEnoughLight) {
         qualityReasons.push("Lighting is too low");
@@ -272,9 +292,9 @@ export function ClipRecorder({
 
   return (
     <div className="space-y-3">
-      <div className="relative h-[44vh] min-h-[18rem] max-h-[34rem] overflow-hidden rounded-card border border-slate-700 sm:h-[50vh] sm:min-h-[22rem] md:h-[58vh] md:min-h-[26rem] md:max-h-[42rem]">
-        <CameraFeed ref={cameraRef ?? videoRef} />
-        <LandmarkOverlay frame={frame} showConfidenceIndicator={false} />
+      <div className="relative mx-auto h-[44vh] min-h-[18rem] w-full max-w-5xl overflow-hidden rounded-card border border-slate-700 sm:h-[50vh] sm:min-h-[22rem] md:h-[58vh] md:min-h-[26rem] md:max-h-[42rem]">
+        <CameraFeed ref={cameraRef ?? videoRef} fit="contain" />
+        <LandmarkOverlay frame={frame} showConfidenceIndicator={false} videoRef={videoRef} fit="contain" />
         <SignGuideOverlay />
       </div>
       <QualityIndicator visibleHands={visibleHands} />

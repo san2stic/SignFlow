@@ -56,12 +56,12 @@ describe("DashboardPage", () => {
     render(<DashboardPage />);
 
     await waitFor(() => {
-      expect(screen.getByText("Model Accuracy Over Time")).toBeInTheDocument();
+      expect(screen.getByText("Précision du modèle dans le temps")).toBeInTheDocument();
     });
 
-    expect(screen.getByText("Signs Per Category")).toBeInTheDocument();
-    expect(screen.getByText("Model Versions")).toBeInTheDocument();
-    expect(screen.getByText("Recent Trainings")).toBeInTheDocument();
-    expect(screen.getByText(/v2/)).toBeInTheDocument();
+    expect(screen.getByText("Signes par catégorie")).toBeInTheDocument();
+    expect(screen.getByText("Versions du modèle")).toBeInTheDocument();
+    expect(screen.getByText("Entraînements récents")).toBeInTheDocument();
+    expect(screen.getAllByText("v2").length).toBeGreaterThan(0);
   });
 });

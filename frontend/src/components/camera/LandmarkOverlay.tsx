@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, type RefObject } from "react";
 import { drawConnectors, drawLandmarks } from "@mediapipe/drawing_utils";
 import { HAND_CONNECTIONS, POSE_CONNECTIONS } from "@mediapipe/holistic";
 
@@ -7,7 +7,63 @@ import type { LandmarkFrame } from "../../lib/mediapipe";
 interface LandmarkOverlayProps {
   frame: LandmarkFrame | null;
   showConnections?: boolean;
-  showConfidenceIndicator?: boolean; // New: show confidence level
+  showConfidenceIndicator?: boolean;
+  videoRef?: RefObject<HTMLVideoElement>;
+  fit?: "cover" | "contain";
+}
+
+interface RenderSpace {
+  offsetX: number;
+  offsetY: number;
+  scaleX: number;
+  scaleY: number;
+}
+
+function computeRenderSpace(
+  canvasWidth: number,
+  canvasHeight: number,
+  videoWidth: number,
+  videoHeight: number,
+  fit: "cover" | "contain"
+): RenderSpace {
+  if (canvasWidth <= 0 || canvasHeight <= 0 || videoWidth <= 0 || videoHeight <= 0) {
+    return { offsetX: 0, offsetY: 0, scaleX: 1, scaleY: 1 };
+  }
+
+  const canvasAspect = canvasWidth / canvasHeight;
+  const videoAspect = videoWidth / videoHeight;
+
+  let drawWidth = canvasWidth;
+  let drawHeight = canvasHeight;
+  let offsetX = 0;
+  let offsetY = 0;
+
+  if (fit === "contain") {
+    if (videoAspect > canvasAspect) {
+      drawWidth = canvasWidth;
+      drawHeight = canvasWidth / videoAspect;
+      offsetY = (canvasHeight - drawHeight) / 2;
+    } else {
+      drawHeight = canvasHeight;
+      drawWidth = canvasHeight * videoAspect;
+      offsetX = (canvasWidth - drawWidth) / 2;
+    }
+  } else if (videoAspect > canvasAspect) {
+    drawHeight = canvasHeight;
+    drawWidth = canvasHeight * videoAspect;
+    offsetX = (canvasWidth - drawWidth) / 2;
+  } else {
+    drawWidth = canvasWidth;
+    drawHeight = canvasWidth / videoAspect;
+    offsetY = (canvasHeight - drawHeight) / 2;
+  }
+
+  return {
+    offsetX,
+    offsetY,
+    scaleX: drawWidth / canvasWidth,
+    scaleY: drawHeight / canvasHeight
+  };
 }
 
 /**
@@ -24,7 +80,9 @@ interface LandmarkOverlayProps {
 export function LandmarkOverlay({
   frame,
   showConnections = true,
-  showConfidenceIndicator = true
+  showConfidenceIndicator = true,
+  videoRef,
+  fit = "cover"
 }: LandmarkOverlayProps): JSX.Element {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
 
@@ -41,15 +99,18 @@ export function LandmarkOverlay({
     canvas.width = width;
     canvas.height = height;
 
+    const videoWidth = videoRef?.current?.videoWidth ?? 0;
+    const videoHeight = videoRef?.current?.videoHeight ?? 0;
+    const renderSpace = computeRenderSpace(width, height, videoWidth, videoHeight, fit);
+
     // Clear previous frame
     ctx.clearRect(0, 0, width, height);
 
-    // Helper to convert normalized landmarks to canvas coordinates
     // Filters out zero-coordinate points (low confidence filtered landmarks)
     const toLandmarkList = (points: number[][]) => {
       return points
         .map((p) => ({ x: p[0], y: p[1], z: p[2] || 0 }))
-        .filter((p) => p.x !== 0 || p.y !== 0 || p.z !== 0); // Remove filtered points
+        .filter((p) => p.x !== 0 || p.y !== 0 || p.z !== 0);
     };
 
     // Draw confidence indicator
@@ -57,30 +118,25 @@ export function LandmarkOverlay({
       const confidence = frame.metadata.averageConfidence;
       const confidencePercent = Math.round(confidence * 100);
 
-      // Draw confidence bar in top-left corner
       const barWidth = 120;
       const barHeight = 8;
       const padding = 10;
 
-      // Background bar
       ctx.fillStyle = "rgba(0, 0, 0, 0.5)";
       ctx.fillRect(padding, padding, barWidth, barHeight);
 
-      // Confidence bar (color changes based on level)
       const confidenceColor =
-        confidence >= 0.8 ? "#10B981" : // Green for high confidence
-        confidence >= 0.5 ? "#F59E0B" : // Yellow for medium
-        "#EF4444"; // Red for low
+        confidence >= 0.8 ? "#10B981" :
+        confidence >= 0.5 ? "#F59E0B" :
+        "#EF4444";
 
       ctx.fillStyle = confidenceColor;
       ctx.fillRect(padding, padding, barWidth * confidence, barHeight);
 
-      // Confidence text
       ctx.fillStyle = "#FFFFFF";
       ctx.font = "12px monospace";
       ctx.fillText(`${confidencePercent}%`, padding + barWidth + 8, padding + barHeight);
 
-      // Draw detection status indicators
       const statusY = padding + barHeight + 20;
       ctx.font = "10px monospace";
 
@@ -98,60 +154,63 @@ export function LandmarkOverlay({
       });
     }
 
-    // Draw pose (body skeleton)
+    ctx.save();
+    ctx.translate(renderSpace.offsetX, renderSpace.offsetY);
+    ctx.scale(renderSpace.scaleX, renderSpace.scaleY);
+
     if (frame.pose && frame.pose.length > 0) {
       const poseLandmarks = toLandmarkList(frame.pose);
 
       if (showConnections) {
         drawConnectors(ctx, poseLandmarks, POSE_CONNECTIONS, {
           color: "#10B981",
-          lineWidth: 3, // Increased from 2 to 3 for better visibility
+          lineWidth: 3
         });
       }
 
       drawLandmarks(ctx, poseLandmarks, {
         color: "#10B981",
         fillColor: "#10B981",
-        radius: 4, // Increased from 3 to 4
+        radius: 4
       });
     }
 
-    // Draw left hand (cyan)
     if (frame.hands.left && frame.hands.left.length > 0) {
       const leftHandLandmarks = toLandmarkList(frame.hands.left);
 
       if (showConnections) {
         drawConnectors(ctx, leftHandLandmarks, HAND_CONNECTIONS, {
           color: "#06B6D4",
-          lineWidth: 3, // Increased from 2 to 3 for better visibility
+          lineWidth: 3
         });
       }
 
       drawLandmarks(ctx, leftHandLandmarks, {
         color: "#06B6D4",
         fillColor: "#06B6D4",
-        radius: 5, // Increased from 4 to 5 for better visibility
+        radius: 5
       });
     }
 
-    // Draw right hand (orange/yellow)
     if (frame.hands.right && frame.hands.right.length > 0) {
       const rightHandLandmarks = toLandmarkList(frame.hands.right);
 
       if (showConnections) {
         drawConnectors(ctx, rightHandLandmarks, HAND_CONNECTIONS, {
           color: "#F59E0B",
-          lineWidth: 3, // Increased from 2 to 3 for better visibility
+          lineWidth: 3
         });
       }
 
       drawLandmarks(ctx, rightHandLandmarks, {
         color: "#F59E0B",
         fillColor: "#F59E0B",
-        radius: 5, // Increased from 4 to 5 for better visibility
+        radius: 5
       });
     }
-  }, [frame, showConnections]);
+
+    ctx.restore();
+  }, [fit, frame, showConnections, showConfidenceIndicator, videoRef]);
 
   return (
     <canvas

@@ -102,9 +102,9 @@ export function ValidationTest({
       <h3 className="font-heading text-lg">Validation Live Test</h3>
       <p className="text-xs text-slate-400">Perform the sign in camera. The live WS translation is used for final check.</p>
 
-      <div className="relative h-[44vh] min-h-[18rem] max-h-[34rem] overflow-hidden rounded-card border border-slate-700 sm:h-[50vh] sm:min-h-[22rem] md:h-[58vh] md:min-h-[26rem] md:max-h-[42rem]">
-        <CameraFeed ref={cameraRef ?? videoRef} />
-        <LandmarkOverlay frame={frame} />
+      <div className="relative mx-auto h-[44vh] min-h-[18rem] w-full max-w-5xl overflow-hidden rounded-card border border-slate-700 sm:h-[50vh] sm:min-h-[22rem] md:h-[58vh] md:min-h-[26rem] md:max-h-[42rem]">
+        <CameraFeed ref={cameraRef ?? videoRef} fit="contain" />
+        <LandmarkOverlay frame={frame} videoRef={videoRef} fit="contain" />
       </div>
 
       {!ws.connected && (

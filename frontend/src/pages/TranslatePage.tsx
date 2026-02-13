@@ -601,115 +601,111 @@ export function TranslatePage(): JSX.Element {
       </AnimatePresence>
 
       {/* Unknown sign prompt modal */}
-      <AnimatePresence>
-        {showUnknownPrompt && (
+      {showUnknownPrompt && (
+        <motion.div
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          className="fixed inset-0 z-[60] flex items-end justify-center bg-black/60 p-4 backdrop-blur-sm sm:items-center"
+        >
           <motion.div
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            className="fixed inset-0 z-[60] flex items-end justify-center bg-black/60 p-4 backdrop-blur-sm sm:items-center"
+            initial={{ scale: 0.9, y: 20 }}
+            animate={{ scale: 1, y: 0 }}
+            className="card neon-border w-full max-w-md p-6"
           >
-            <motion.div
-              initial={{ scale: 0.9, y: 20 }}
-              animate={{ scale: 1, y: 0 }}
-              exit={{ scale: 0.9, y: 20 }}
-              className="card neon-border w-full max-w-md p-6"
-            >
-              <div className="mb-4 flex items-center gap-3">
-                <div className="flex h-12 w-12 items-center justify-center rounded-full bg-gradient-to-br from-primary/20 to-secondary/20">
-                  <svg className="h-6 w-6 text-primary" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8.228 9c.549-1.165 2.03-2 3.772-2 2.21 0 4 1.343 4 3 0 1.4-1.278 2.575-3.006 2.907-.542.104-.994.54-.994 1.093m0 3h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-                  </svg>
-                </div>
-                <h3 className="font-display text-xl font-semibold">Signe inconnu détecté</h3>
+            <div className="mb-4 flex items-center gap-3">
+              <div className="flex h-12 w-12 items-center justify-center rounded-full bg-gradient-to-br from-primary/20 to-secondary/20">
+                <svg className="h-6 w-6 text-primary" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8.228 9c.549-1.165 2.03-2 3.772-2 2.21 0 4 1.343 4 3 0 1.4-1.278 2.575-3.006 2.907-.542.104-.994.54-.994 1.093m0 3h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
               </div>
+              <h3 className="font-display text-xl font-semibold">Signe inconnu détecté</h3>
+            </div>
 
-              {unknownPromptMode === "decision" ? (
-                <>
-                  <p className="mb-6 text-sm text-text-secondary">
-                    La confiance est restée faible. Voulez-vous créer un nouveau signe ou l&apos;assigner à un signe existant avant
-                    entraînement ?
-                  </p>
-                  <div className="grid gap-3">
-                    <button
-                      className="touch-btn bg-gradient-to-br from-primary to-secondary text-white"
-                      onClick={addUnknownToTraining}
-                    >
-                      Ajouter un nouveau signe
-                    </button>
-                    <button
-                      className="touch-btn bg-gradient-to-br from-accent/30 to-accent-dark/30 text-accent backdrop-blur-sm"
-                      onClick={startAssignToExisting}
-                    >
-                      Assigner à un signe existant
-                    </button>
-                    <button
-                      className="touch-btn bg-surface-secondary text-text-secondary"
-                      onClick={dismissUnknownPrompt}
-                    >
-                      Ignorer
-                    </button>
-                  </div>
-                </>
-              ) : (
-                <div className="space-y-4">
-                  <label className="flex flex-col gap-2 text-sm">
-                    <span className="font-medium text-text-secondary">Choisir un signe existant</span>
-                    <input
-                      className="rounded-btn border border-primary/30 bg-surface-secondary/80 px-4 py-3 text-base backdrop-blur-sm transition-all focus:border-primary focus:outline-none focus:ring-2 focus:ring-primary/50"
-                      value={assignQuery}
-                      onChange={(event) => setAssignQuery(event.target.value)}
-                      placeholder="Rechercher un signe..."
-                      autoFocus
-                    />
-                  </label>
-
-                  {isLoadingCandidates && (
-                    <div className="shimmer h-8 rounded-btn" />
-                  )}
-                  {assignError && (
-                    <p className="text-xs text-red-400">{assignError}</p>
-                  )}
-
-                  {!isLoadingCandidates && assignCandidates.length === 0 && assignQuery.trim() && (
-                    <p className="text-xs text-text-tertiary">Aucun signe trouvé. Vous pouvez ajouter un nouveau signe.</p>
-                  )}
-
-                  <div className="max-h-64 space-y-2 overflow-auto">
-                    {assignCandidates.map((candidate) => (
-                      <motion.button
-                        key={candidate.id}
-                        initial={{ opacity: 0, x: -20 }}
-                        animate={{ opacity: 1, x: 0 }}
-                        className="card w-full p-4 text-left transition-all hover:scale-[1.02]"
-                        onClick={() => assignToExistingSign(candidate)}
-                      >
-                        <p className="font-medium text-text">{candidate.name}</p>
-                        <p className="text-xs text-text-tertiary">{candidate.category ?? "Sans catégorie"}</p>
-                      </motion.button>
-                    ))}
-                  </div>
-
-                  <div className="grid grid-cols-2 gap-3">
-                    <button
-                      className="touch-btn bg-surface-secondary text-text-secondary"
-                      onClick={() => setUnknownPromptMode("decision")}
-                    >
-                      Retour
-                    </button>
-                    <button
-                      className="touch-btn bg-gradient-to-br from-primary to-secondary text-white"
-                      onClick={addUnknownToTraining}
-                    >
-                      Nouveau signe
-                    </button>
-                  </div>
+            {unknownPromptMode === "decision" ? (
+              <>
+                <p className="mb-6 text-sm text-text-secondary">
+                  La confiance est restée faible. Voulez-vous créer un nouveau signe ou l&apos;assigner à un signe existant avant
+                  entraînement ?
+                </p>
+                <div className="grid gap-3">
+                  <button
+                    className="touch-btn bg-gradient-to-br from-primary to-secondary text-white"
+                    onClick={addUnknownToTraining}
+                  >
+                    Ajouter un nouveau signe
+                  </button>
+                  <button
+                    className="touch-btn bg-gradient-to-br from-accent/30 to-accent-dark/30 text-accent backdrop-blur-sm"
+                    onClick={startAssignToExisting}
+                  >
+                    Assigner à un signe existant
+                  </button>
+                  <button
+                    className="touch-btn bg-surface-secondary text-text-secondary"
+                    onClick={dismissUnknownPrompt}
+                  >
+                    Ignorer
+                  </button>
                 </div>
-              )}
-            </motion.div>
+              </>
+            ) : (
+              <div className="space-y-4">
+                <label className="flex flex-col gap-2 text-sm">
+                  <span className="font-medium text-text-secondary">Choisir un signe existant</span>
+                  <input
+                    className="rounded-btn border border-primary/30 bg-surface-secondary/80 px-4 py-3 text-base backdrop-blur-sm transition-all focus:border-primary focus:outline-none focus:ring-2 focus:ring-primary/50"
+                    value={assignQuery}
+                    onChange={(event) => setAssignQuery(event.target.value)}
+                    placeholder="Rechercher un signe..."
+                    autoFocus
+                  />
+                </label>
+
+                {isLoadingCandidates && (
+                  <div className="shimmer h-8 rounded-btn" />
+                )}
+                {assignError && (
+                  <p className="text-xs text-red-400">{assignError}</p>
+                )}
+
+                {!isLoadingCandidates && assignCandidates.length === 0 && assignQuery.trim() && (
+                  <p className="text-xs text-text-tertiary">Aucun signe trouvé. Vous pouvez ajouter un nouveau signe.</p>
+                )}
+
+                <div className="max-h-64 space-y-2 overflow-auto">
+                  {assignCandidates.map((candidate) => (
+                    <motion.button
+                      key={candidate.id}
+                      initial={{ opacity: 0, x: -20 }}
+                      animate={{ opacity: 1, x: 0 }}
+                      className="card w-full p-4 text-left transition-all hover:scale-[1.02]"
+                      onClick={() => assignToExistingSign(candidate)}
+                    >
+                      <p className="font-medium text-text">{candidate.name}</p>
+                      <p className="text-xs text-text-tertiary">{candidate.category ?? "Sans catégorie"}</p>
+                    </motion.button>
+                  ))}
+                </div>
+
+                <div className="grid grid-cols-2 gap-3">
+                  <button
+                    className="touch-btn bg-surface-secondary text-text-secondary"
+                    onClick={() => setUnknownPromptMode("decision")}
+                  >
+                    Retour
+                  </button>
+                  <button
+                    className="touch-btn bg-gradient-to-br from-primary to-secondary text-white"
+                    onClick={addUnknownToTraining}
+                  >
+                    Nouveau signe
+                  </button>
+                </div>
+              </div>
+            )}
           </motion.div>
-        )}
-      </AnimatePresence>
+        </motion.div>
+      )}
     </section>
   );
 }

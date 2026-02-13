@@ -10,6 +10,8 @@ interface UseMediaPipeOptions {
   targetFps?: number;
   includeFace?: boolean;
   modelComplexity?: 0 | 1 | 2; // 0=lite, 1=full, 2=heavy (most accurate)
+  minDetectionConfidence?: number;
+  minTrackingConfidence?: number;
 }
 
 export function useMediaPipe({
@@ -17,7 +19,9 @@ export function useMediaPipe({
   enabled,
   targetFps = 30, // Increased from 12 to 30 for smoother sign language capture
   includeFace = false,
-  modelComplexity = 2 // Use highest quality model by default for best accuracy
+  modelComplexity = 2, // Use highest quality model by default for best accuracy
+  minDetectionConfidence = 0.7,
+  minTrackingConfidence = 0.7
 }: UseMediaPipeOptions): { frame: LandmarkFrame | null; ready: boolean } {
   const [frame, setFrame] = useState<LandmarkFrame | null>(null);
   const [ready, setReady] = useState(false);
@@ -50,8 +54,8 @@ export function useMediaPipe({
       smoothLandmarks: true, // Keep landmark smoothing for temporal consistency
       enableSegmentation: false, // Not needed for sign language
       refineFaceLandmarks: true, // Enable for better facial expression detection
-      minDetectionConfidence: 0.7, // Increased from 0.5 to 0.7 for higher precision
-      minTrackingConfidence: 0.7 // Increased from 0.5 to 0.7 for better tracking
+      minDetectionConfidence, // Configurable by context (training can be more permissive)
+      minTrackingConfidence // Configurable by context (training can be more permissive)
     });
 
     holistic.onResults((results) => {
@@ -95,7 +99,7 @@ export function useMediaPipe({
       window.cancelAnimationFrame(rafId);
       void holistic.close();
     };
-  }, [enabled, includeFace, targetFps, videoRef]);
+  }, [enabled, includeFace, minDetectionConfidence, minTrackingConfidence, modelComplexity, targetFps, videoRef]);
 
   return { frame, ready };
 }

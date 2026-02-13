@@ -2,12 +2,15 @@ import { forwardRef } from "react";
 
 interface CameraFeedProps {
   className?: string;
+  fit?: "cover" | "contain";
 }
 
 export const CameraFeed = forwardRef<HTMLVideoElement, CameraFeedProps>(function CameraFeed(
-  { className },
+  { className, fit = "cover" },
   ref
 ): JSX.Element {
+  const fitClass = fit === "contain" ? "object-contain" : "object-cover";
+
   return (
     <video
       ref={ref}
@@ -15,7 +18,7 @@ export const CameraFeed = forwardRef<HTMLVideoElement, CameraFeedProps>(function
       muted
       playsInline
       aria-label="Camera feed"
-      className={`h-full w-full rounded-card bg-black object-cover ${className ?? ""}`}
+      className={`h-full w-full rounded-card bg-black ${fitClass} ${className ?? ""}`}
     />
   );
 });

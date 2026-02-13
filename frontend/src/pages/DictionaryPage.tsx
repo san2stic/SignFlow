@@ -39,6 +39,28 @@ function downloadBlob(filename: string, blob: Blob): void {
   URL.revokeObjectURL(url);
 }
 
+function getStorageItem(key: string): string | null {
+  try {
+    if (typeof window === "undefined" || !window.localStorage || typeof window.localStorage.getItem !== "function") {
+      return null;
+    }
+    return window.localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
+function setStorageItem(key: string, value: string): void {
+  try {
+    if (typeof window === "undefined" || !window.localStorage || typeof window.localStorage.setItem !== "function") {
+      return;
+    }
+    window.localStorage.setItem(key, value);
+  } catch {
+    // Intentionally ignore storage errors (quota/security/test env shims).
+  }
+}
+
 export function DictionaryPage(): JSX.Element {
   const navigate = useNavigate();
   const [query, setQuery] = useState("");
@@ -68,10 +90,10 @@ export function DictionaryPage(): JSX.Element {
     try {
       const payload = await getGraph();
       setGraph(payload);
-      localStorage.setItem(GRAPH_CACHE_KEY, JSON.stringify(payload));
+      setStorageItem(GRAPH_CACHE_KEY, JSON.stringify(payload));
       setIsOfflineFallback(false);
     } catch {
-      const cached = localStorage.getItem(GRAPH_CACHE_KEY);
+      const cached = getStorageItem(GRAPH_CACHE_KEY);
       if (cached) {
         try {
           const parsed = JSON.parse(cached) as GraphPayload;
@@ -88,10 +110,10 @@ export function DictionaryPage(): JSX.Element {
     try {
       const response = await listSigns(query);
       setSigns(response.items);
-      localStorage.setItem(SIGNS_CACHE_KEY, JSON.stringify(response.items));
+      setStorageItem(SIGNS_CACHE_KEY, JSON.stringify(response.items));
       setIsOfflineFallback(false);
     } catch {
-      const cached = localStorage.getItem(SIGNS_CACHE_KEY);
+      const cached = getStorageItem(SIGNS_CACHE_KEY);
       if (cached) {
         try {
           const parsed = JSON.parse(cached) as Sign[];

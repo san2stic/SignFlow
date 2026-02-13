@@ -1,4 +1,4 @@
-import { act, render, screen, within } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -101,7 +101,7 @@ describe("TranslatePage", () => {
       });
     });
 
-    const currentSignPanel = screen.getByText("Current sign").parentElement as HTMLElement;
+    const currentSignPanel = screen.getByText("Signe détecté").parentElement as HTMLElement;
     expect(within(currentSignPanel).getByText("lsfb_bonjour")).toBeInTheDocument();
 
     act(() => {
@@ -231,9 +231,7 @@ describe("TranslatePage", () => {
     expect(screen.getByText("B O N J O U R")).toBeInTheDocument();
   });
 
-  it("auto-closes unknown prompt when a confident prediction arrives", () => {
-    vi.useFakeTimers();
-
+  it("auto-closes unknown prompt when a confident prediction arrives", async () => {
     render(
       <MemoryRouter>
         <TranslatePage />
@@ -255,10 +253,9 @@ describe("TranslatePage", () => {
         sentence_buffer: "",
         is_sentence_complete: false
       });
-      vi.advanceTimersByTime(750);
     });
 
-    expect(screen.getByText("Signe inconnu détecté")).toBeInTheDocument();
+    expect(await screen.findByText("Signe inconnu détecté")).toBeInTheDocument();
 
     act(() => {
       wsMessageHandler?.({
@@ -270,6 +267,8 @@ describe("TranslatePage", () => {
       });
     });
 
-    expect(screen.queryByText("Signe inconnu détecté")).not.toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.queryByText("Signe inconnu détecté")).not.toBeInTheDocument();
+    });
   });
 });

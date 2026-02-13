@@ -5,6 +5,12 @@ interface BufferedChunk {
   timestamp: number;
 }
 
+interface ZoomCapability {
+  min: number;
+  max: number;
+  step?: number;
+}
+
 function preferredRecorderMimeType(): string | null {
   const candidates = [
     "video/mp4;codecs=avc1.42E01E,mp4a.40.2",
@@ -29,6 +35,56 @@ async function bindStreamToVideo(videoElement: HTMLVideoElement, stream: MediaSt
 
   if (videoElement.paused) {
     await videoElement.play();
+  }
+}
+
+async function getCameraStream(facingMode: "user" | "environment"): Promise<MediaStream> {
+  const preferredConstraints: MediaStreamConstraints = {
+    audio: false,
+    video: {
+      facingMode: { exact: facingMode },
+      width: { ideal: 1280, min: 640 },
+      height: { ideal: 960, min: 480 },
+      aspectRatio: { ideal: 4 / 3 },
+      frameRate: { ideal: 30, max: 30 }
+    }
+  };
+
+  const fallbackConstraints: MediaStreamConstraints = {
+    audio: false,
+    video: {
+      facingMode,
+      width: 640,
+      height: 480,
+      frameRate: 30
+    }
+  };
+
+  try {
+    return await navigator.mediaDevices.getUserMedia(preferredConstraints);
+  } catch {
+    return navigator.mediaDevices.getUserMedia(fallbackConstraints);
+  }
+}
+
+async function applyWidestAvailableZoom(stream: MediaStream): Promise<void> {
+  const videoTrack = stream.getVideoTracks()[0];
+  if (!videoTrack || typeof videoTrack.getCapabilities !== "function") {
+    return;
+  }
+
+  const capabilities = videoTrack.getCapabilities() as MediaTrackCapabilities & { zoom?: ZoomCapability };
+  const zoomCapability = capabilities.zoom;
+  if (!zoomCapability || typeof zoomCapability.min !== "number") {
+    return;
+  }
+
+  try {
+    await videoTrack.applyConstraints({
+      advanced: [{ zoom: zoomCapability.min } as MediaTrackConstraintSet]
+    });
+  } catch {
+    // Ignore if the browser/device does not allow runtime zoom changes.
   }
 }
 
@@ -69,21 +125,14 @@ export function useCamera() {
       preRollChunksRef.current = [];
 
       try {
-        const stream = await navigator.mediaDevices.getUserMedia({
-          audio: false,
-          video: {
-            facingMode,
-            width: 640,
-            height: 480,
-            frameRate: 30
-          }
-        });
+        const stream = await getCameraStream(facingMode);
 
         if (cancelled) {
           stream.getTracks().forEach((track) => track.stop());
           return;
         }
 
+        await applyWidestAvailableZoom(stream);
         streamRef.current = stream;
 
         if (videoRef.current) {

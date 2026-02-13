@@ -1,6 +1,6 @@
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { createRef } from "react";
+import { createRef, forwardRef } from "react";
 import { describe, expect, it, vi } from "vitest";
 
 import { ValidationTest } from "../ValidationTest";
@@ -14,7 +14,9 @@ vi.mock("../../../hooks/useWebSocket", () => ({
 }));
 
 vi.mock("../../camera/CameraFeed", () => ({
-  CameraFeed: () => <div>camera</div>
+  CameraFeed: forwardRef<HTMLVideoElement>(function MockCameraFeed(_props, _ref) {
+    return <div>camera</div>;
+  })
 }));
 
 vi.mock("../../camera/LandmarkOverlay", () => ({
