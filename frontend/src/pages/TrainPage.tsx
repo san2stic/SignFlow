@@ -5,6 +5,8 @@ import { useCamera } from "../hooks/useCamera";
 import { TrainingWizard } from "../components/training/TrainingWizard";
 import { TabsWithContext, Tab } from "../components/common/Tabs";
 import { useLabelingStore } from "../stores/labelingStore";
+import { VideoGrid } from "../components/labeling/VideoGrid";
+import { LabelingModal } from "../components/labeling/LabelingModal";
 
 interface TrainPageLocationState {
   assignedSign?: {
@@ -19,7 +21,8 @@ export function TrainPage(): JSX.Element {
   const location = useLocation();
   const { videoRef, attachVideoRef } = useCamera();
   const [activeTab, setActiveTab] = useState<"record" | "label">("record");
-  const { unlabeledVideos, loadUnlabeledVideos } = useLabelingStore();
+  const { unlabeledVideos, selectedVideo, selectVideo, labelVideo, loadUnlabeledVideos } = useLabelingStore();
+  const [selectedSignForLabeling, setSelectedSignForLabeling] = useState<string | null>(null);
 
   const initialAssignedSign = useMemo(() => {
     const state = location.state as TrainPageLocationState | null;
@@ -45,11 +48,26 @@ export function TrainPage(): JSX.Element {
           <TrainingWizard videoRef={videoRef} cameraRef={attachVideoRef} initialAssignedSign={initialAssignedSign} />
         )}
         {activeTab === "label" && (
-          <div className="flex items-center justify-center min-h-[400px] text-slate-400">
-            <p className="text-lg">Video labeling interface coming soon...</p>
-          </div>
+          <VideoGrid
+            videos={unlabeledVideos}
+            selectedVideo={selectedVideo}
+            onSelectVideo={selectVideo}
+          />
         )}
       </div>
+
+      <LabelingModal
+        video={selectedVideo}
+        onClose={() => selectVideo(null)}
+        onLabel={labelVideo}
+        onSignSelect={setSelectedSignForLabeling}
+        selectedSignId={selectedSignForLabeling}
+      >
+        {/* Temporary placeholder for SignSelector (Task 10) */}
+        <div className="p-4 bg-slate-800 rounded border border-slate-700 text-slate-400 text-center">
+          SignSelector component will go here (Task 10)
+        </div>
+      </LabelingModal>
     </div>
   );
 }
