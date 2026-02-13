@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 
 import numpy as np
@@ -15,6 +16,14 @@ from app.ml.model import SignTransformer
 from app.ml.trainer import load_model_checkpoint
 
 logger = structlog.get_logger(__name__)
+
+
+class InferenceState(Enum):
+    """States for the inference state machine."""
+
+    IDLE = "idle"
+    RECORDING = "recording"
+    INFERRING = "inferring"
 
 
 @dataclass
@@ -35,35 +44,57 @@ class SignFlowInferencePipeline:
         self,
         *,
         model_path: str | Path | None = None,
-        seq_len: int = 30,
+        seq_len: int = 64,
         confidence_threshold: float = 0.7,
         smoothing_window: int = 5,
         min_hand_visibility: float = 0.2,
         min_prediction_margin: float = 0.1,
+        min_motion_energy: float = 0.003,
         device: str = "cpu",
+        max_buffer_frames: int = 180,
+        rest_frames_threshold: int = 10,
+        motion_start_threshold: float = 0.005,
+        min_recording_frames: int = 15,
     ) -> None:
         """
         Initialize inference pipeline.
 
         Args:
             model_path: Path to model checkpoint. If None, pipeline runs without model.
-            seq_len: Sequence length for sliding window (default: 30 frames)
+            seq_len: Target sequence length for model input (default: 64 frames)
             confidence_threshold: Minimum confidence to accept prediction (default: 0.7)
             smoothing_window: Temporal smoothing window size in frames.
             min_hand_visibility: Minimum rolling hand visibility required to infer.
             min_prediction_margin: Minimum top1-top2 probability margin before accepting.
+            min_motion_energy: Minimum hand motion level for stable confidence.
             device: Device to run inference on ("cpu" or "cuda")
+            max_buffer_frames: Maximum frames to buffer before forcing inference.
+            rest_frames_threshold: Consecutive low-motion frames to detect sign end.
+            motion_start_threshold: Motion energy threshold to start recording.
+            min_recording_frames: Minimum frames recorded before allowing sign end.
         """
         self.seq_len = seq_len
         self.confidence_threshold = confidence_threshold
         self.min_hand_visibility = min_hand_visibility
         self.min_prediction_margin = min_prediction_margin
+        self.min_motion_energy = min_motion_energy
         self.device = torch.device(device)
-        self.frame_buffer: deque[np.ndarray] = deque(maxlen=seq_len)
+        self.frame_buffer: deque[np.ndarray] = deque(maxlen=max_buffer_frames)
         self.hand_visibility_history: deque[float] = deque(maxlen=seq_len)
+        self.motion_history: deque[float] = deque(maxlen=seq_len)
         self.prediction_history: deque[tuple[str, float]] = deque(maxlen=max(3, smoothing_window))
         self.labels: list[str] = ["NONE"]
         self.sentence_tokens: list[str] = []
+        self._current_motion_energy = 0.0
+
+        # State machine attributes
+        self.max_buffer_frames = max_buffer_frames
+        self.rest_frames_threshold = rest_frames_threshold
+        self.motion_start_threshold = motion_start_threshold
+        self.min_recording_frames = min_recording_frames
+        self.state = InferenceState.IDLE
+        self._rest_frame_count = 0
+        self._recording_frame_count = 0
 
         # Load model if path provided
         self.model: SignTransformer | None = None
@@ -103,7 +134,7 @@ class SignFlowInferencePipeline:
         logger.debug("labels_set", num_labels=len(self.labels))
 
     def process_frame(self, payload: dict) -> Prediction:
-        """Process a landmarks frame and return smoothed prediction output."""
+        """Process a landmarks frame through the state machine."""
         frame = FrameLandmarks(
             left_hand=payload.get("hands", {}).get("left", []) or [],
             right_hand=payload.get("hands", {}).get("right", []) or [],
@@ -116,51 +147,103 @@ class SignFlowInferencePipeline:
 
         features = normalize_landmarks(frame, include_face=False)
         self.frame_buffer.append(features)
+        self._current_motion_energy = self._compute_motion_energy()
+        self.motion_history.append(self._current_motion_energy)
 
-        if len(self.frame_buffer) < self.seq_len:
-            return Prediction(
-                prediction="NONE",
-                confidence=0.0,
-                alternatives=[],
-                sentence_buffer=" ".join(self.sentence_tokens),
-                is_sentence_complete=False,
+        # State machine
+        if self.state == InferenceState.IDLE:
+            if (self._current_motion_energy > self.motion_start_threshold
+                    and hand_visibility > self.min_hand_visibility):
+                self.state = InferenceState.RECORDING
+                self._recording_frame_count = 1
+                self._rest_frame_count = 0
+            return self._idle_prediction()
+
+        if self.state == InferenceState.RECORDING:
+            self._recording_frame_count += 1
+
+            is_resting = self._current_motion_energy < self.motion_start_threshold
+            if is_resting:
+                self._rest_frame_count += 1
+            else:
+                self._rest_frame_count = 0
+
+            sign_ended = (
+                (self._rest_frame_count >= self.rest_frames_threshold
+                 and self._recording_frame_count >= self.min_recording_frames)
+                or len(self.frame_buffer) >= self.max_buffer_frames
             )
 
-        # Reject predictions when hands are not visible enough in the active window.
-        if self._mean_hand_visibility() < self.min_hand_visibility:
-            alternatives = []
-            self.prediction_history.clear()
-        else:
-            predicted_label, predicted_confidence, alternatives = self._infer_window(
-                np.stack(self.frame_buffer, axis=0)
-            )
-            self.prediction_history.append((predicted_label, predicted_confidence))
+            if sign_ended:
+                return self._infer_complete_sign()
 
-        smoothed_prediction, smoothed_confidence = self._smooth()
-        if smoothed_prediction != "NONE" and smoothed_confidence >= self.confidence_threshold:
-            if not self.sentence_tokens or self.sentence_tokens[-1] != smoothed_prediction:
-                self.sentence_tokens.append(smoothed_prediction)
+            return self._recording_prediction()
 
-        is_complete = len(self.sentence_tokens) > 0 and smoothed_prediction == "NONE"
-        if is_complete and self.sentence_tokens:
-            sentence = " ".join(self.sentence_tokens) + "."
-        else:
-            sentence = " ".join(self.sentence_tokens)
+        # INFERRING state fallback
+        self.state = InferenceState.IDLE
+        return self._idle_prediction()
 
+    def _idle_prediction(self) -> Prediction:
+        """Return a neutral prediction for the IDLE state."""
         return Prediction(
-            prediction=smoothed_prediction,
-            confidence=smoothed_confidence,
+            prediction="NONE",
+            confidence=0.0,
+            alternatives=[],
+            sentence_buffer=" ".join(self.sentence_tokens),
+            is_sentence_complete=False,
+        )
+
+    def _recording_prediction(self) -> Prediction:
+        """Return a recording-in-progress prediction."""
+        return Prediction(
+            prediction="RECORDING",
+            confidence=0.0,
+            alternatives=[],
+            sentence_buffer=" ".join(self.sentence_tokens),
+            is_sentence_complete=False,
+        )
+
+    def _infer_complete_sign(self) -> Prediction:
+        """Run inference on the complete recorded sign."""
+        from app.ml.dataset import temporal_resample
+        from app.ml.feature_engineering import compute_enriched_features
+
+        buffer_array = np.stack(list(self.frame_buffer), axis=0)
+        resampled = temporal_resample(buffer_array, target_len=self.seq_len)
+        enriched = compute_enriched_features(resampled)
+
+        predicted_label, predicted_confidence, alternatives = self._infer_window(enriched)
+
+        # Reset for next sign
+        self.frame_buffer.clear()
+        self._rest_frame_count = 0
+        self._recording_frame_count = 0
+        self.state = InferenceState.IDLE
+
+        if predicted_label != "NONE" and predicted_confidence >= self.confidence_threshold:
+            if not self.sentence_tokens or self.sentence_tokens[-1] != predicted_label:
+                self.sentence_tokens.append(predicted_label)
+
+        sentence = " ".join(self.sentence_tokens)
+        return Prediction(
+            prediction=predicted_label,
+            confidence=predicted_confidence,
             alternatives=alternatives,
             sentence_buffer=sentence,
-            is_sentence_complete=is_complete,
+            is_sentence_complete=False,
         )
 
     def reset(self) -> None:
         """Reset temporal state for a new translation session."""
         self.frame_buffer.clear()
         self.hand_visibility_history.clear()
+        self.motion_history.clear()
         self.prediction_history.clear()
         self.sentence_tokens.clear()
+        self._current_motion_energy = 0.0
+        self.state = InferenceState.IDLE
+        self._rest_frame_count = 0
+        self._recording_frame_count = 0
 
     def _infer_window(self, window: np.ndarray) -> tuple[str, float, list[dict[str, float]]]:
         """
@@ -256,6 +339,12 @@ class SignFlowInferencePipeline:
             return 0.0
         return float(np.mean(self.hand_visibility_history))
 
+    def _mean_motion_energy(self) -> float:
+        """Return rolling hand motion magnitude over the active frame window."""
+        if not self.motion_history:
+            return 0.0
+        return float(np.mean(self.motion_history))
+
     def _compute_hand_visibility(self, frame: FrameLandmarks) -> float:
         """Estimate hand landmark visibility score in [0, 1] for one frame."""
         expected_points_per_hand = 21
@@ -272,6 +361,31 @@ class SignFlowInferencePipeline:
         total_visible = visible_points(frame.left_hand) + visible_points(frame.right_hand)
         total_expected = expected_points_per_hand * 2
         return min(1.0, total_visible / total_expected)
+
+    def _compute_motion_energy(self) -> float:
+        """Estimate hand motion energy between recent frames."""
+        if len(self.frame_buffer) < 2:
+            return 0.0
+
+        previous = self.frame_buffer[-2]
+        current = self.frame_buffer[-1]
+        hand_previous = previous[:126]  # left + right hands
+        hand_current = current[:126]
+        motion = np.mean(np.abs(hand_current - hand_previous))
+        return float(motion)
+
+    def _adaptive_threshold(self) -> float:
+        """
+        Raise threshold when tracking quality drops.
+
+        This suppresses false positives for low-visibility / low-motion windows.
+        """
+        threshold = self.confidence_threshold
+        if self._mean_hand_visibility() < max(0.3, self.min_hand_visibility + 0.05):
+            threshold += 0.05
+        if self._mean_motion_energy() < self.min_motion_energy:
+            threshold += 0.06
+        return float(min(0.95, threshold))
 
     def _calibrate_confidence(
         self,
@@ -291,8 +405,19 @@ class SignFlowInferencePipeline:
         max_entropy = float(np.log(max(len(probs), 2)))
         certainty = 1.0 - min(1.0, entropy / max_entropy)
 
-        calibrated = (0.65 * raw_confidence) + (0.25 * margin) + (0.10 * certainty)
+        # Motion-aware calibration for open-set rejection in static/noisy windows.
+        motion_factor = np.clip(
+            self._current_motion_energy / max(self.min_motion_energy, 1e-6), 0.0, 1.0
+        )
+        calibrated = (
+            (0.58 * raw_confidence)
+            + (0.24 * margin)
+            + (0.10 * certainty)
+            + (0.08 * motion_factor)
+        )
         if margin < self.min_prediction_margin:
             calibrated *= margin / self.min_prediction_margin
+        if self._current_motion_energy < self.min_motion_energy:
+            calibrated *= 0.85
 
         return float(np.clip(calibrated, 0.0, 1.0))
