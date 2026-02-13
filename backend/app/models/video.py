@@ -18,7 +18,12 @@ class Video(Base):
     __tablename__ = "videos"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
-    sign_id: Mapped[str] = mapped_column(String(36), ForeignKey("signs.id", ondelete="CASCADE"), index=True)
+    sign_id: Mapped[Optional[str]] = mapped_column(
+        String(36),
+        ForeignKey("signs.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True
+    )
 
     file_path: Mapped[str] = mapped_column(String(512), nullable=False)
     thumbnail_path: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
