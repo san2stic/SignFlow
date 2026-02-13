@@ -7,6 +7,8 @@ import { TabsWithContext, Tab } from "../components/common/Tabs";
 import { useLabelingStore } from "../stores/labelingStore";
 import { VideoGrid } from "../components/labeling/VideoGrid";
 import { LabelingModal } from "../components/labeling/LabelingModal";
+import { SignSelector } from "../components/labeling/SignSelector";
+import { Sign } from "../api/signs";
 
 interface TrainPageLocationState {
   assignedSign?: {
@@ -21,7 +23,7 @@ export function TrainPage(): JSX.Element {
   const location = useLocation();
   const { videoRef, attachVideoRef } = useCamera();
   const [activeTab, setActiveTab] = useState<"record" | "label">("record");
-  const { unlabeledVideos, selectedVideo, selectVideo, labelVideo, loadUnlabeledVideos } = useLabelingStore();
+  const { unlabeledVideos, selectedVideo, selectVideo, labelVideo, loadUnlabeledVideos, recentSigns, addToRecentSigns } = useLabelingStore();
   const [selectedSignForLabeling, setSelectedSignForLabeling] = useState<string | null>(null);
 
   const initialAssignedSign = useMemo(() => {
@@ -63,10 +65,15 @@ export function TrainPage(): JSX.Element {
         onSignSelect={setSelectedSignForLabeling}
         selectedSignId={selectedSignForLabeling}
       >
-        {/* Temporary placeholder for SignSelector (Task 10) */}
-        <div className="p-4 bg-slate-800 rounded border border-slate-700 text-slate-400 text-center">
-          SignSelector component will go here (Task 10)
-        </div>
+        <SignSelector
+          recentSigns={recentSigns}
+          selectedSignId={selectedSignForLabeling}
+          onSelectSign={setSelectedSignForLabeling}
+          onSignCreated={(signId, signName) => {
+            setSelectedSignForLabeling(signId);
+            addToRecentSigns({ id: signId, name: signName } as Sign);
+          }}
+        />
       </LabelingModal>
     </div>
   );
