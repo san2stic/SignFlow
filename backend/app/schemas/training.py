@@ -15,6 +15,17 @@ class TrainingConfig(BaseModel):
     epochs: int = Field(default=50, ge=1, le=500)
     learning_rate: float = Field(default=1e-4, gt=0, le=1)
     augmentation: bool = True
+    sequence_length: int = Field(default=64, ge=8, le=256)
+    early_stopping_patience: int = Field(default=15, ge=1, le=100)
+    early_stopping_min_delta: float = Field(default=1e-4, ge=0, le=1)
+    weight_decay: float = Field(default=0.05, ge=0, le=1)
+    classifier_lr_multiplier: float = Field(default=2.0, ge=0.1, le=20)
+    label_smoothing: float = Field(default=0.1, ge=0.0, le=0.4)
+    warmup_epochs: int = Field(default=3, ge=0, le=100)
+    use_mixup: bool = True
+    mixup_alpha: float = Field(default=0.3, ge=0.0, le=1.0)
+    use_ema: bool = True
+    ema_decay: float = Field(default=0.995, ge=0.8, le=0.9999)
     min_deploy_accuracy: float = Field(default=0.85, ge=0.0, le=1.0)
 
 

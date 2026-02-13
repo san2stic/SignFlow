@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import threading
+from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 
 import numpy as np
 import structlog
+import torch
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -42,6 +44,50 @@ class TrainingService:
             return float((config or {}).get("min_deploy_accuracy", 0.85))
         except (TypeError, ValueError):
             return 0.85
+
+    @staticmethod
+    def _resolve_device() -> str:
+        """Pick best available torch device for training."""
+        if torch.cuda.is_available():
+            return "cuda"
+        if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
+            return "mps"
+        return "cpu"
+
+    @staticmethod
+    def _stratified_train_val_indices(
+        labels: list[int],
+        *,
+        val_ratio: float = 0.2,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Create stratified train/val split to stabilize minority classes."""
+        if not labels:
+            return np.array([], dtype=np.int64), np.array([], dtype=np.int64)
+
+        by_label: dict[int, list[int]] = defaultdict(list)
+        for index, label in enumerate(labels):
+            by_label[int(label)].append(index)
+
+        train_indices: list[int] = []
+        val_indices: list[int] = []
+        rng = np.random.default_rng()
+
+        for class_indices in by_label.values():
+            shuffled = np.array(class_indices, dtype=np.int64)
+            rng.shuffle(shuffled)
+            val_count = max(1, int(len(shuffled) * val_ratio)) if len(shuffled) > 1 else 1
+            val_count = min(val_count, max(1, len(shuffled) - 1)) if len(shuffled) > 1 else 1
+            val_indices.extend(shuffled[:val_count].tolist())
+            train_indices.extend(shuffled[val_count:].tolist())
+
+        # Guard against degenerate splits.
+        if not train_indices:
+            train_indices, val_indices = val_indices[:-1], val_indices[-1:]
+        if not val_indices:
+            val_indices = train_indices[:1]
+            train_indices = train_indices[1:] if len(train_indices) > 1 else train_indices
+
+        return np.array(train_indices, dtype=np.int64), np.array(val_indices, dtype=np.int64)
 
     def _build_session_metrics(
         self,
@@ -271,39 +317,38 @@ class TrainingService:
                 class_labels = [item[0] for item in sorted(label_map.items(), key=lambda item: item[1])]
                 logger.info("data_loaded", num_samples=len(sequences), num_classes=num_classes)
 
-                # Apply data augmentation for few-shot learning
-                if mode == "few-shot" and config.get("augmentation", True):
-                    logger.info("applying_data_augmentation")
+                # Apply data augmentation for all modes
+                if config.get("augmentation", True):
+                    logger.info("applying_data_augmentation", mode=mode)
                     sequences, labels = augment_dataset(
                         sequences,
                         labels,
-                        num_augmentations_per_sample=3,
+                        num_augmentations_per_sample=5,
                         augmentation_probability=0.5,
                     )
                     logger.info("augmentation_complete", total_samples=len(sequences))
 
-                # Create train/val split
-                val_split = 0.2
-                num_val = max(1, int(len(sequences) * val_split))
-                indices = np.random.permutation(len(sequences))
-                train_indices = indices[num_val:]
-                val_indices = indices[:num_val]
+                # Create stratified train/val split.
+                train_indices, val_indices = self._stratified_train_val_indices(labels, val_ratio=0.2)
 
                 train_samples = [SignSample(sequences[i], labels[i]) for i in train_indices]
                 val_samples = [SignSample(sequences[i], labels[i]) for i in val_indices]
 
-                # Create datasets
+                sequence_length = int(config.get("sequence_length", 64))
+                sequence_length = max(8, min(256, sequence_length))
+
+                # Create datasets with resampling + enriched features
                 train_dataset = LandmarkDataset(
                     train_samples,
-                    sequence_length=30,
-                    stride=10,
-                    apply_sliding_window=True,
+                    sequence_length=sequence_length,
+                    apply_sliding_window=False,
+                    use_enriched_features=True,
                 )
                 val_dataset = LandmarkDataset(
                     val_samples,
-                    sequence_length=30,
-                    stride=10,
-                    apply_sliding_window=True,
+                    sequence_length=sequence_length,
+                    apply_sliding_window=False,
+                    use_enriched_features=True,
                 )
 
                 session.progress = 10.0
@@ -319,8 +364,12 @@ class TrainingService:
             db.commit()
 
             try:
+                device = self._resolve_device()
+
                 # Create model
-                num_features = 225  # 21*3*2 (hands) + 33*3 (pose)
+                from app.ml.feature_engineering import ENRICHED_FEATURE_DIM
+                num_features = ENRICHED_FEATURE_DIM
+
                 if mode == "few-shot":
                     active_checkpoint = (
                         active_model.file_path
@@ -331,9 +380,9 @@ class TrainingService:
                         checkpoint_path=active_checkpoint,
                         num_features=num_features,
                         num_classes=num_classes,
-                        d_model=256,
-                        device="cpu",
-                        freeze_until_layer=3,
+                        d_model=128,
+                        device=device,
+                        freeze_until_layer=1,
                     )
                     model = prepared.model
                     num_classes = model.num_classes
@@ -341,18 +390,28 @@ class TrainingService:
                     model = SignTransformer(
                         num_features=num_features,
                         num_classes=num_classes,
-                        d_model=256,
                     )
 
                 # Training configuration
                 ml_config = MLTrainingConfig(
                     num_epochs=int(config.get("epochs", 50)),
-                    learning_rate=float(config.get("learning_rate", 1e-4)),
+                    learning_rate=float(
+                        config.get("learning_rate", 1e-4 if mode == "few-shot" else 3e-4)
+                    ),
                     batch_size=32,
                     num_workers=2,
-                    device="cpu",  # Use CPU by default
-                    early_stopping_patience=10,
+                    device=device,
+                    early_stopping_patience=int(config.get("early_stopping_patience", 15)),
+                    early_stopping_min_delta=float(config.get("early_stopping_min_delta", 1e-4)),
+                    weight_decay=float(config.get("weight_decay", 0.05)),
+                    classifier_lr_multiplier=float(config.get("classifier_lr_multiplier", 2.0)),
+                    label_smoothing=float(config.get("label_smoothing", 0.1)),
+                    warmup_epochs=int(config.get("warmup_epochs", 3)),
                     use_focal_loss=(mode == "few-shot"),  # Focal loss for few-shot
+                    use_mixup=bool(config.get("use_mixup", True)),
+                    mixup_alpha=float(config.get("mixup_alpha", 0.3)),
+                    use_ema=bool(config.get("use_ema", True)),
+                    ema_decay=float(config.get("ema_decay", 0.995)),
                 )
 
                 # Progress callback
@@ -394,7 +453,7 @@ class TrainingService:
                         model=model,
                         train_dataset=train_dataset,
                         val_dataset=val_dataset,
-                        device="cpu",
+                        device=device,
                         batch_size=ml_config.batch_size,
                     )
                     progress_callback(proto_metric)
