@@ -14,6 +14,11 @@ Plateforme mobile-first de traduction LSFB en temps réel, entraînement few-sho
 - Pipeline ML landmarks -> Transformer -> post-processing
 - Few-shot training avec versioning de modèles, seuil de déploiement et activation
 - CRUD signes + upload vidéos + extraction landmarks backend
+- Video Labeling:
+  - interface de labellisation assistée par ML
+  - suggestions intelligentes basées sur similarité cosinus
+  - labellisation groupée de vidéos similaires
+  - recherche et création de signes inline
 - Dictionary:
   - graphe relationnel
   - notes markdown + wikilinks `[[...]]`
@@ -116,6 +121,10 @@ npm run build
 - `GET /api/v1/signs/{sign_id}/backlinks`
 - `POST /api/v1/signs/{sign_id}/videos`
 - `GET /api/v1/signs/{sign_id}/videos`
+- `GET /api/v1/videos/unlabeled`
+- `PATCH /api/v1/videos/{video_id}/label`
+- `POST /api/v1/videos/{video_id}/suggestions`
+- `PATCH /api/v1/videos/bulk-label`
 - `GET/POST /api/v1/training/sessions`
 - `POST /api/v1/training/sessions/{session_id}/deploy`
 - `WS /api/v1/training/sessions/{session_id}/live`
