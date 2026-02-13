@@ -8,13 +8,13 @@ export function QualityIndicator({ visibleHands }: QualityIndicatorProps): JSX.E
       ? {
           dotColor: "bg-secondary",
           panelColor: "bg-secondary/15 border-secondary/30",
-          text: "Perfect - both hands detected"
+          text: "Valid - both hands detected"
         }
       : visibleHands === 1
         ? {
-            dotColor: "bg-accent",
-            panelColor: "bg-accent/15 border-accent/30",
-            text: "Good - one hand detected"
+            dotColor: "bg-secondary",
+            panelColor: "bg-secondary/15 border-secondary/30",
+            text: "Valid - one hand detected (single-hand signs supported)"
           }
         : {
             dotColor: "bg-red-500",

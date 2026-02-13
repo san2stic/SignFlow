@@ -55,6 +55,8 @@ class SignFlowInferencePipeline:
         rest_frames_threshold: int = 10,
         motion_start_threshold: float = 0.005,
         min_recording_frames: int = 15,
+        pre_roll_frames: int = 4,
+        frontend_confidence_floor: float = 0.35,
     ) -> None:
         """
         Initialize inference pipeline.
@@ -72,12 +74,16 @@ class SignFlowInferencePipeline:
             rest_frames_threshold: Consecutive low-motion frames to detect sign end.
             motion_start_threshold: Motion energy threshold to start recording.
             min_recording_frames: Minimum frames recorded before allowing sign end.
+            pre_roll_frames: Number of frames to keep before motion onset.
+            frontend_confidence_floor: Confidence floor for frontend landmarks quality.
         """
         self.seq_len = seq_len
         self.confidence_threshold = confidence_threshold
         self.min_hand_visibility = min_hand_visibility
         self.min_prediction_margin = min_prediction_margin
         self.min_motion_energy = min_motion_energy
+        self.pre_roll_frames = max(0, pre_roll_frames)
+        self.frontend_confidence_floor = float(np.clip(frontend_confidence_floor, 0.0, 1.0))
         self.device = torch.device(device)
         self.frame_buffer: deque[np.ndarray] = deque(maxlen=max_buffer_frames)
         self.hand_visibility_history: deque[float] = deque(maxlen=seq_len)
@@ -95,6 +101,7 @@ class SignFlowInferencePipeline:
         self.state = InferenceState.IDLE
         self._rest_frame_count = 0
         self._recording_frame_count = 0
+        self._latest_frontend_confidence = 1.0
 
         # Load model if path provided
         self.model: SignTransformer | None = None
@@ -164,10 +171,11 @@ class SignFlowInferencePipeline:
 
         # Use metadata if available (from improved frontend detection)
         metadata = payload.get("metadata", {})
-        frontend_confidence = metadata.get("averageConfidence", None)
+        frontend_confidence = self._resolve_frontend_confidence(metadata)
+        self._latest_frontend_confidence = frontend_confidence
 
         # Log frontend confidence for monitoring (optional)
-        if frontend_confidence is not None and frontend_confidence < 0.3:
+        if frontend_confidence < 0.3:
             logger.debug(
                 "low_frontend_confidence",
                 confidence=round(frontend_confidence, 3),
@@ -175,7 +183,8 @@ class SignFlowInferencePipeline:
                 right_visible=metadata.get("rightHandVisible", False),
             )
 
-        hand_visibility = self._compute_hand_visibility(frame)
+        raw_hand_visibility = self._compute_hand_visibility(frame)
+        hand_visibility = self._blend_hand_visibility(raw_hand_visibility, frontend_confidence)
         self.hand_visibility_history.append(hand_visibility)
 
         features = normalize_landmarks(frame, include_face=False)
@@ -187,6 +196,13 @@ class SignFlowInferencePipeline:
         if self.state == InferenceState.IDLE:
             if (self._current_motion_energy > self.motion_start_threshold
                     and hand_visibility > self.min_hand_visibility):
+                if self.pre_roll_frames > 0:
+                    context_frames = list(self.frame_buffer)[-self.pre_roll_frames:]
+                    self.frame_buffer.clear()
+                    self.frame_buffer.extend(context_frames)
+                else:
+                    self.frame_buffer.clear()
+                    self.frame_buffer.append(features)
                 self.state = InferenceState.RECORDING
                 self._recording_frame_count = 1
                 self._rest_frame_count = 0
@@ -241,11 +257,22 @@ class SignFlowInferencePipeline:
         from app.ml.dataset import temporal_resample
         from app.ml.feature_engineering import compute_enriched_features
 
+        if not self.frame_buffer:
+            self.state = InferenceState.IDLE
+            return self._idle_prediction()
+
         buffer_array = np.stack(list(self.frame_buffer), axis=0)
-        resampled = temporal_resample(buffer_array, target_len=self.seq_len)
+        trimmed = self._trim_recording_window(buffer_array, trailing_rest=self._rest_frame_count)
+        resampled = temporal_resample(trimmed, target_len=self.seq_len)
         enriched = compute_enriched_features(resampled)
 
         predicted_label, predicted_confidence, alternatives = self._infer_window(enriched)
+        adaptive_threshold = self._adaptive_threshold()
+        predicted_label, predicted_confidence = self._apply_prediction_filters(
+            prediction=predicted_label,
+            confidence=predicted_confidence,
+            threshold=adaptive_threshold,
+        )
 
         # Reset for next sign
         self.frame_buffer.clear()
@@ -253,7 +280,7 @@ class SignFlowInferencePipeline:
         self._recording_frame_count = 0
         self.state = InferenceState.IDLE
 
-        if predicted_label != "NONE" and predicted_confidence >= self.confidence_threshold:
+        if predicted_label != "NONE" and predicted_confidence >= adaptive_threshold:
             if not self.sentence_tokens or self.sentence_tokens[-1] != predicted_label:
                 self.sentence_tokens.append(predicted_label)
 
@@ -277,6 +304,7 @@ class SignFlowInferencePipeline:
         self.state = InferenceState.IDLE
         self._rest_frame_count = 0
         self._recording_frame_count = 0
+        self._latest_frontend_confidence = 1.0
 
     def _infer_window(self, window: np.ndarray) -> tuple[str, float, list[dict[str, float]]]:
         """
@@ -430,7 +458,80 @@ class SignFlowInferencePipeline:
             threshold += 0.05
         if self._mean_motion_energy() < self.min_motion_energy:
             threshold += 0.06
+        if self._latest_frontend_confidence < self.frontend_confidence_floor:
+            threshold += 0.08
+        elif self._latest_frontend_confidence < 0.55:
+            threshold += 0.04
         return float(min(0.95, threshold))
+
+    def _apply_prediction_filters(
+        self,
+        *,
+        prediction: str,
+        confidence: float,
+        threshold: float,
+    ) -> tuple[str, float]:
+        """Filter raw predictions with temporal consensus + adaptive threshold."""
+        if prediction == "NONE" or confidence <= 0.0:
+            return "NONE", 0.0
+
+        if self.prediction_history and self.prediction_history[-1][0] != prediction:
+            self.prediction_history.clear()
+
+        self.prediction_history.append((prediction, confidence))
+        smoothed_label, smoothed_confidence = self._smooth()
+
+        # Keep fast response when a stable label repeats.
+        if smoothed_label == prediction:
+            confidence = max(confidence, smoothed_confidence)
+
+        if confidence < threshold:
+            return "NONE", 0.0
+
+        return prediction, round(confidence, 3)
+
+    def _trim_recording_window(self, window: np.ndarray, trailing_rest: int) -> np.ndarray:
+        """Trim pre/post idle frames before resampling."""
+        if window.ndim != 2 or window.shape[0] == 0:
+            return window
+
+        trimmed = window
+        if trailing_rest > 0:
+            min_keep = max(2, self.min_recording_frames // 2)
+            if trimmed.shape[0] > (trailing_rest + min_keep):
+                trimmed = trimmed[:-trailing_rest]
+
+        hand_energy = np.mean(np.abs(trimmed[:, :126]), axis=1)
+        active_indices = np.flatnonzero(hand_energy > 1e-4)
+        if active_indices.size == 0:
+            return trimmed
+
+        start = int(max(0, active_indices[0] - 1))
+        end = int(min(trimmed.shape[0], active_indices[-1] + 2))
+        if end <= start:
+            return trimmed
+        return trimmed[start:end]
+
+    @staticmethod
+    def _resolve_frontend_confidence(metadata: dict) -> float:
+        """Parse frontend confidence metadata into a stable [0, 1] range."""
+        if not isinstance(metadata, dict):
+            return 1.0
+        value = metadata.get("averageConfidence")
+        try:
+            confidence = float(value)
+        except (TypeError, ValueError):
+            return 1.0
+        if np.isnan(confidence):
+            return 1.0
+        return float(np.clip(confidence, 0.0, 1.0))
+
+    def _blend_hand_visibility(self, hand_visibility: float, frontend_confidence: float) -> float:
+        """Blend backend-computed hand visibility with frontend tracking quality."""
+        if frontend_confidence >= self.frontend_confidence_floor:
+            return hand_visibility
+        penalty = (self.frontend_confidence_floor - frontend_confidence) * 0.8
+        return float(max(0.0, hand_visibility - penalty))
 
     def _calibrate_confidence(
         self,

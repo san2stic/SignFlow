@@ -25,6 +25,10 @@ interface StreamPayload {
 
 type UnknownPromptMode = "decision" | "assign";
 
+const UNKNOWN_PROMPT_GRACE_MS = 700;
+const UNKNOWN_PROMPT_COOLDOWN_MS = 3000;
+const UNKNOWN_PROMPT_RECOVERY_CONFIDENCE = 0.7;
+
 export function TranslatePage(): JSX.Element {
   const navigate = useNavigate();
   const { videoRef, attachVideoRef, toggleFacing, capturePreRollClip } = useCamera();
@@ -42,6 +46,8 @@ export function TranslatePage(): JSX.Element {
   const unknownFrameWindow = useSettingsStore((state) => state.unknownFrameWindow);
 
   const live = useTranslateStore((state) => state.live);
+  const displayedPredictionRaw = useTranslateStore((state) => state.displayedPrediction);
+  const displayedConfidence = useTranslateStore((state) => state.displayedConfidence);
   const history = useTranslateStore((state) => state.history);
   const setLive = useTranslateStore((state) => state.setLive);
   const reset = useTranslateStore((state) => state.reset);
@@ -58,6 +64,32 @@ export function TranslatePage(): JSX.Element {
   const [isLoadingCandidates, setIsLoadingCandidates] = useState(false);
   const [assignError, setAssignError] = useState<string | null>(null);
   const lowConfidenceFrames = useRef(0);
+  const unknownPromptTimer = useRef<number | null>(null);
+  const cooldownResetTimer = useRef<number | null>(null);
+  const promptCooldownRef = useRef(false);
+  const showUnknownPromptRef = useRef(false);
+
+  const clearUnknownPromptTimer = (): void => {
+    if (unknownPromptTimer.current !== null) {
+      window.clearTimeout(unknownPromptTimer.current);
+      unknownPromptTimer.current = null;
+    }
+  };
+
+  const startPromptCooldown = (): void => {
+    if (cooldownResetTimer.current !== null) {
+      window.clearTimeout(cooldownResetTimer.current);
+      cooldownResetTimer.current = null;
+    }
+
+    promptCooldownRef.current = true;
+    setPromptCooldown(true);
+    cooldownResetTimer.current = window.setTimeout(() => {
+      promptCooldownRef.current = false;
+      setPromptCooldown(false);
+      cooldownResetTimer.current = null;
+    }, UNKNOWN_PROMPT_COOLDOWN_MS);
+  };
 
   const ws = useWebSocket<LandmarkFrame, StreamPayload>({
     path: "/translate/stream",
@@ -73,15 +105,54 @@ export function TranslatePage(): JSX.Element {
         speak(payload.prediction);
       }
 
+      const isConfidentPrediction =
+        payload.prediction !== "NONE" &&
+        payload.prediction !== "RECORDING" &&
+        payload.confidence >= UNKNOWN_PROMPT_RECOVERY_CONFIDENCE;
+      if (isConfidentPrediction) {
+        lowConfidenceFrames.current = 0;
+        clearUnknownPromptTimer();
+        if (showUnknownPromptRef.current) {
+          showUnknownPromptRef.current = false;
+          setShowUnknownPrompt(false);
+          resetUnknownPromptState();
+        }
+        return;
+      }
+
       const isWarmup =
         payload.prediction === "NONE" && payload.confidence === 0 && payload.alternatives.length === 0;
-      const isLowConfidence = !isWarmup && (payload.prediction === "NONE" || payload.confidence < unknownThreshold);
-      lowConfidenceFrames.current = isLowConfidence ? lowConfidenceFrames.current + 1 : 0;
-
-      if (!promptCooldown && lowConfidenceFrames.current >= unknownFrameWindow) {
-        setShowUnknownPrompt(true);
-        setPromptCooldown(true);
+      const isLowConfidence =
+        !isWarmup &&
+        payload.prediction !== "RECORDING" &&
+        (payload.prediction === "NONE" || payload.confidence < unknownThreshold);
+      if (!isLowConfidence) {
         lowConfidenceFrames.current = 0;
+        clearUnknownPromptTimer();
+        return;
+      }
+
+      lowConfidenceFrames.current += 1;
+      if (promptCooldownRef.current || showUnknownPromptRef.current) {
+        return;
+      }
+
+      if (lowConfidenceFrames.current >= unknownFrameWindow && unknownPromptTimer.current === null) {
+        unknownPromptTimer.current = window.setTimeout(() => {
+          unknownPromptTimer.current = null;
+
+          if (promptCooldownRef.current || showUnknownPromptRef.current) {
+            return;
+          }
+          if (lowConfidenceFrames.current < unknownFrameWindow) {
+            return;
+          }
+
+          showUnknownPromptRef.current = true;
+          setShowUnknownPrompt(true);
+          startPromptCooldown();
+          lowConfidenceFrames.current = 0;
+        }, UNKNOWN_PROMPT_GRACE_MS);
       }
     }
   });
@@ -90,6 +161,23 @@ export function TranslatePage(): JSX.Element {
     if (!frame || !ws.connected) return;
     ws.send(serializeLandmarkFrame(frame));
   }, [frame, ws.connected, ws.send]);
+
+  useEffect(() => {
+    promptCooldownRef.current = promptCooldown;
+  }, [promptCooldown]);
+
+  useEffect(() => {
+    showUnknownPromptRef.current = showUnknownPrompt;
+  }, [showUnknownPrompt]);
+
+  useEffect(() => {
+    return () => {
+      clearUnknownPromptTimer();
+      if (cooldownResetTimer.current !== null) {
+        window.clearTimeout(cooldownResetTimer.current);
+      }
+    };
+  }, []);
 
   useEffect(() => {
     if (!promptCooldown) {
@@ -157,9 +245,12 @@ export function TranslatePage(): JSX.Element {
   };
 
   const dismissUnknownPrompt = (): void => {
+    clearUnknownPromptTimer();
+    lowConfidenceFrames.current = 0;
+    showUnknownPromptRef.current = false;
     setShowUnknownPrompt(false);
     resetUnknownPromptState();
-    window.setTimeout(() => setPromptCooldown(false), 3000);
+    startPromptCooldown();
   };
 
   const handoffToTraining = (options?: { assignedSign?: Pick<Sign, "id" | "name"> }): void => {
@@ -171,7 +262,11 @@ export function TranslatePage(): JSX.Element {
         file,
         suggestedName:
           options?.assignedSign?.name ??
-          (live.prediction !== "NONE" ? live.prediction : live.alternatives[0]?.sign ?? ""),
+          (displayedPredictionRaw !== "NONE"
+            ? displayedPredictionRaw
+            : live.prediction !== "NONE" && live.prediction !== "RECORDING"
+              ? live.prediction
+              : live.alternatives[0]?.sign ?? ""),
         assignedSign: options?.assignedSign
           ? {
               signId: options.assignedSign.id,
@@ -190,6 +285,8 @@ export function TranslatePage(): JSX.Element {
     }
 
     setShowUnknownPrompt(false);
+    showUnknownPromptRef.current = false;
+    clearUnknownPromptTimer();
     resetUnknownPromptState();
     navigate("/train");
   };
@@ -200,7 +297,13 @@ export function TranslatePage(): JSX.Element {
 
   const startAssignToExisting = (): void => {
     setUnknownPromptMode("assign");
-    setAssignQuery(live.prediction !== "NONE" ? live.prediction : live.alternatives[0]?.sign ?? "");
+    setAssignQuery(
+      displayedPredictionRaw !== "NONE"
+        ? displayedPredictionRaw
+        : live.prediction !== "NONE" && live.prediction !== "RECORDING"
+          ? live.prediction
+          : live.alternatives[0]?.sign ?? ""
+    );
   };
 
   const assignToExistingSign = (sign: Pick<Sign, "id" | "name">): void => {
@@ -208,13 +311,13 @@ export function TranslatePage(): JSX.Element {
   };
 
   const displayedPrediction =
-    spellingMode && live.prediction !== "NONE"
-      ? live.prediction
+    spellingMode && displayedPredictionRaw !== "NONE"
+      ? displayedPredictionRaw
           .replace(/^lsfb_/i, "")
           .split("")
           .map((char) => char.toUpperCase())
           .join(" ")
-      : live.prediction;
+      : displayedPredictionRaw;
 
   return (
     <section className="space-y-4">
@@ -245,7 +348,7 @@ export function TranslatePage(): JSX.Element {
           <p className="font-heading text-3xl">{displayedPrediction}</p>
         </div>
         <div className="w-40">
-          <ConfidenceBadge confidence={live.confidence} />
+          <ConfidenceBadge confidence={displayedConfidence} />
         </div>
       </motion.div>
 

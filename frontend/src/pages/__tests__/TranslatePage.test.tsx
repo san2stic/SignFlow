@@ -1,7 +1,7 @@
-import { act, render, screen } from "@testing-library/react";
+import { act, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { listSigns } from "../../api/signs";
 import { TranslatePage } from "../TranslatePage";
@@ -59,6 +59,10 @@ vi.mock("../../api/signs", () => ({
 }));
 
 describe("TranslatePage", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   beforeEach(() => {
     wsMessageHandler = null;
     vi.mocked(listSigns).mockClear();
@@ -70,9 +74,60 @@ describe("TranslatePage", () => {
     });
     useTranslateStore.setState({
       live: { prediction: "NONE", confidence: 0, sentenceBuffer: "", alternatives: [] },
+      displayedPrediction: "NONE",
+      displayedConfidence: 0,
+      displayUntilMs: 0,
       history: []
     });
     useTrainingStore.setState({ pendingClip: null });
+  });
+
+  it("keeps the last confident word visible for a short hold period", () => {
+    vi.useFakeTimers();
+
+    render(
+      <MemoryRouter>
+        <TranslatePage />
+      </MemoryRouter>
+    );
+
+    act(() => {
+      wsMessageHandler?.({
+        prediction: "lsfb_bonjour",
+        confidence: 0.91,
+        alternatives: [],
+        sentence_buffer: "lsfb_bonjour",
+        is_sentence_complete: false
+      });
+    });
+
+    const currentSignPanel = screen.getByText("Current sign").parentElement as HTMLElement;
+    expect(within(currentSignPanel).getByText("lsfb_bonjour")).toBeInTheDocument();
+
+    act(() => {
+      wsMessageHandler?.({
+        prediction: "NONE",
+        confidence: 0,
+        alternatives: [],
+        sentence_buffer: "lsfb_bonjour",
+        is_sentence_complete: false
+      });
+    });
+
+    expect(within(currentSignPanel).getByText("lsfb_bonjour")).toBeInTheDocument();
+
+    act(() => {
+      vi.advanceTimersByTime(1600);
+      wsMessageHandler?.({
+        prediction: "NONE",
+        confidence: 0,
+        alternatives: [],
+        sentence_buffer: "lsfb_bonjour",
+        is_sentence_complete: false
+      });
+    });
+
+    expect(within(currentSignPanel).getByText("NONE")).toBeInTheDocument();
   });
 
   it("opens unknown-sign prompt and pushes pre-roll clip to training handoff", async () => {
@@ -103,7 +158,7 @@ describe("TranslatePage", () => {
       });
     });
 
-    expect(screen.getByText("Signe inconnu détecté")).toBeInTheDocument();
+    expect(await screen.findByText("Signe inconnu détecté")).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "Ajouter un nouveau signe" }));
 
@@ -139,7 +194,7 @@ describe("TranslatePage", () => {
       });
     });
 
-    await user.click(screen.getByRole("button", { name: "Assigner à un signe existant" }));
+    await user.click(await screen.findByRole("button", { name: "Assigner à un signe existant" }));
     await user.click(await screen.findByRole("button", { name: /lsfb_bonjour/i }));
 
     const pendingClip = useTrainingStore.getState().pendingClip;
@@ -174,5 +229,47 @@ describe("TranslatePage", () => {
     });
 
     expect(screen.getByText("B O N J O U R")).toBeInTheDocument();
+  });
+
+  it("auto-closes unknown prompt when a confident prediction arrives", () => {
+    vi.useFakeTimers();
+
+    render(
+      <MemoryRouter>
+        <TranslatePage />
+      </MemoryRouter>
+    );
+
+    act(() => {
+      wsMessageHandler?.({
+        prediction: "NONE",
+        confidence: 0.2,
+        alternatives: [],
+        sentence_buffer: "",
+        is_sentence_complete: false
+      });
+      wsMessageHandler?.({
+        prediction: "NONE",
+        confidence: 0.2,
+        alternatives: [],
+        sentence_buffer: "",
+        is_sentence_complete: false
+      });
+      vi.advanceTimersByTime(750);
+    });
+
+    expect(screen.getByText("Signe inconnu détecté")).toBeInTheDocument();
+
+    act(() => {
+      wsMessageHandler?.({
+        prediction: "lsfb_bonjour",
+        confidence: 0.84,
+        alternatives: [],
+        sentence_buffer: "lsfb_bonjour",
+        is_sentence_complete: false
+      });
+    });
+
+    expect(screen.queryByText("Signe inconnu détecté")).not.toBeInTheDocument();
   });
 });

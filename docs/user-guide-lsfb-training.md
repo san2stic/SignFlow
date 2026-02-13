@@ -21,12 +21,11 @@ Ajouter un nouveau signe LSFB, l’entraîner, le valider en live, puis le dépl
 
 1. Se positionner dans le guide visuel.
 2. Vérifier l’indicateur de qualité mains:
-   - Vert: deux mains visibles
-   - Orange: une main
+   - Vert: une ou deux mains visibles (les signes à une main sont acceptés)
    - Rouge: aucune main
 3. Enregistrer des clips 2-5 secondes.
 4. Les clips sont validés avec règles:
-   - mains détectées sur >= 80% des frames
+   - au moins une main détectée sur >= 80% des frames
    - geste suffisamment centré
    - luminosité suffisante
 5. Atteindre `5/5` clips valides puis cliquer `Start Training`.
@@ -67,7 +66,7 @@ Dans `Dictionary`:
 
 ## Dépannage rapide
 
-- `Hands visibility too low`: rapprocher les mains et stabiliser le geste.
+- `At least one hand must be visible in >=80% of frames`: rapprocher la main active et stabiliser le geste.
 - `Gesture too often outside center frame`: recentrer le corps/les mains.
 - `Lighting is too low`: augmenter l’éclairage.
 - `Deployment failed`: vérifier backend/worker et relancer.

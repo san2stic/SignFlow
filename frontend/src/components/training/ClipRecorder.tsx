@@ -209,7 +209,7 @@ export function ClipRecorder({
         qualityReasons.push("Video quality too low");
       }
       if (!hasVisibleHands) {
-        qualityReasons.push("Hands visibility too low (<80% frames)");
+        qualityReasons.push("At least one hand must be visible in >=80% of frames");
       }
       if (!isCentered) {
         qualityReasons.push("Gesture too often outside center frame");

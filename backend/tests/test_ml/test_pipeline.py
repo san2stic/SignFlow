@@ -80,3 +80,59 @@ def test_pipeline_single_class_label_mapping_has_no_none_offset() -> None:
     assert prediction == "lsfb_bonjour"
     assert confidence > 0.7
     assert alternatives == []
+
+
+def test_pipeline_adaptive_threshold_increases_on_low_frontend_confidence() -> None:
+    """Adaptive threshold should become stricter when frontend tracking confidence is low."""
+    pipeline = SignFlowInferencePipeline(
+        confidence_threshold=0.7,
+        min_motion_energy=0.003,
+        frontend_confidence_floor=0.4,
+    )
+    pipeline.hand_visibility_history.extend([0.9, 0.95, 0.92])
+    pipeline.motion_history.extend([0.02, 0.019, 0.021])
+
+    pipeline._latest_frontend_confidence = 0.9
+    high_quality_threshold = pipeline._adaptive_threshold()
+
+    pipeline._latest_frontend_confidence = 0.2
+    low_quality_threshold = pipeline._adaptive_threshold()
+
+    assert high_quality_threshold >= pipeline.confidence_threshold
+    assert low_quality_threshold > high_quality_threshold
+
+
+def test_pipeline_trim_recording_window_removes_idle_edges() -> None:
+    """Trimming should remove obvious idle frames before/after active sign motion."""
+    pipeline = SignFlowInferencePipeline(min_recording_frames=6)
+
+    idle_before = np.zeros((4, 225), dtype=np.float32)
+    active = np.ones((8, 225), dtype=np.float32) * 0.2
+    idle_after = np.zeros((3, 225), dtype=np.float32)
+    window = np.concatenate([idle_before, active, idle_after], axis=0)
+
+    trimmed = pipeline._trim_recording_window(window, trailing_rest=3)
+
+    assert trimmed.shape[0] < window.shape[0]
+    assert np.any(np.abs(trimmed[:, :126]) > 1e-6)
+
+
+def test_pipeline_prediction_filters_reject_below_threshold() -> None:
+    """Post-processing should reject predictions that do not meet adaptive threshold."""
+    pipeline = SignFlowInferencePipeline()
+
+    label, confidence = pipeline._apply_prediction_filters(
+        prediction="bonjour",
+        confidence=0.66,
+        threshold=0.7,
+    )
+    assert label == "NONE"
+    assert confidence == 0.0
+
+    accepted_label, accepted_confidence = pipeline._apply_prediction_filters(
+        prediction="bonjour",
+        confidence=0.82,
+        threshold=0.7,
+    )
+    assert accepted_label == "bonjour"
+    assert accepted_confidence >= 0.82
