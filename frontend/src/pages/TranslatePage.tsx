@@ -28,7 +28,13 @@ type UnknownPromptMode = "decision" | "assign";
 export function TranslatePage(): JSX.Element {
   const navigate = useNavigate();
   const { videoRef, attachVideoRef, toggleFacing, capturePreRollClip } = useCamera();
-  const { frame } = useMediaPipe({ videoRef, enabled: true, targetFps: 12, includeFace: false });
+  const { frame, ready } = useMediaPipe({
+    videoRef,
+    enabled: true,
+    targetFps: 30, // Increased from 12 to 30 for better motion capture
+    includeFace: false,
+    modelComplexity: 2 // Use highest quality model for best accuracy
+  });
 
   const speakOnDetect = useSettingsStore((state) => state.speakOnDetect);
   const spellingMode = useSettingsStore((state) => state.spellingMode);
@@ -221,7 +227,12 @@ export function TranslatePage(): JSX.Element {
 
       <div className="relative h-[55vh] min-h-80 overflow-hidden rounded-card border border-slate-700/70">
         <CameraFeed ref={attachVideoRef} />
-        <LandmarkOverlay frame={frame} />
+        <LandmarkOverlay frame={frame} showConfidenceIndicator={true} />
+        {!ready && (
+          <div className="absolute inset-0 flex items-center justify-center bg-black/50">
+            <p className="text-sm text-white">Initialisation de MediaPipe...</p>
+          </div>
+        )}
       </div>
 
       <motion.div

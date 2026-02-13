@@ -77,8 +77,9 @@ export function TrainingWizard({ videoRef, cameraRef, initialAssignedSign }: Tra
   const { frame } = useMediaPipe({
     videoRef,
     enabled: step === 2,
-    targetFps: 8,
-    includeFace: false
+    targetFps: 30, // Increased from 8 to 30 for better landmark detection during recording
+    includeFace: false,
+    modelComplexity: 2 // Use highest quality for best training data
   });
 
   const visibleHands = countVisibleHands(frame);

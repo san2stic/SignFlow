@@ -9,13 +9,15 @@ interface UseMediaPipeOptions {
   enabled: boolean;
   targetFps?: number;
   includeFace?: boolean;
+  modelComplexity?: 0 | 1 | 2; // 0=lite, 1=full, 2=heavy (most accurate)
 }
 
 export function useMediaPipe({
   videoRef,
   enabled,
-  targetFps = 12,
-  includeFace = false
+  targetFps = 30, // Increased from 12 to 30 for smoother sign language capture
+  includeFace = false,
+  modelComplexity = 2 // Use highest quality model by default for best accuracy
 }: UseMediaPipeOptions): { frame: LandmarkFrame | null; ready: boolean } {
   const [frame, setFrame] = useState<LandmarkFrame | null>(null);
   const [ready, setReady] = useState(false);
@@ -44,12 +46,12 @@ export function useMediaPipe({
     });
 
     holistic.setOptions({
-      modelComplexity: 1,
-      smoothLandmarks: true,
-      enableSegmentation: false,
-      refineFaceLandmarks: false,
-      minDetectionConfidence: 0.5,
-      minTrackingConfidence: 0.5
+      modelComplexity: modelComplexity, // Use configurable model complexity (default: 2 = highest)
+      smoothLandmarks: true, // Keep landmark smoothing for temporal consistency
+      enableSegmentation: false, // Not needed for sign language
+      refineFaceLandmarks: true, // Enable for better facial expression detection
+      minDetectionConfidence: 0.7, // Increased from 0.5 to 0.7 for higher precision
+      minTrackingConfidence: 0.7 // Increased from 0.5 to 0.7 for better tracking
     });
 
     holistic.onResults((results) => {

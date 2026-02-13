@@ -142,6 +142,19 @@ class SignFlowInferencePipeline:
             face=payload.get("face", []) or [],
         )
 
+        # Use metadata if available (from improved frontend detection)
+        metadata = payload.get("metadata", {})
+        frontend_confidence = metadata.get("averageConfidence", None)
+
+        # Log frontend confidence for monitoring (optional)
+        if frontend_confidence is not None and frontend_confidence < 0.3:
+            logger.debug(
+                "low_frontend_confidence",
+                confidence=round(frontend_confidence, 3),
+                left_visible=metadata.get("leftHandVisible", False),
+                right_visible=metadata.get("rightHandVisible", False),
+            )
+
         hand_visibility = self._compute_hand_visibility(frame)
         self.hand_visibility_history.append(hand_visibility)
 

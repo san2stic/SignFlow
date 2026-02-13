@@ -2,8 +2,10 @@ import { useEffect, useRef, useState, type Dispatch, type Ref, type RefObject, t
 
 import type { LandmarkFrame } from "../../lib/mediapipe";
 import { CameraFeed } from "../camera/CameraFeed";
+import { LandmarkOverlay } from "../camera/LandmarkOverlay";
 import { RecordButton } from "../camera/RecordButton";
 import { ClipCounter } from "./ClipCounter";
+import { ClipPreview } from "./ClipPreview";
 import { QualityIndicator } from "./QualityIndicator";
 import { SignGuideOverlay } from "./SignGuideOverlay";
 
@@ -272,6 +274,7 @@ export function ClipRecorder({
     <div className="space-y-3">
       <div className="relative h-[44vh] min-h-[18rem] max-h-[34rem] overflow-hidden rounded-card border border-slate-700 sm:h-[50vh] sm:min-h-[22rem] md:h-[58vh] md:min-h-[26rem] md:max-h-[42rem]">
         <CameraFeed ref={cameraRef ?? videoRef} />
+        <LandmarkOverlay frame={frame} showConfidenceIndicator={false} />
         <SignGuideOverlay />
       </div>
       <QualityIndicator visibleHands={visibleHands} />
@@ -284,19 +287,14 @@ export function ClipRecorder({
       {clips.length > 0 && (
         <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
           {clips.map((clip) => (
-            <article key={clip.id} className="rounded-btn border border-slate-700 bg-slate-900/60 p-2">
-              <video src={clip.url} controls className="mb-2 h-24 w-full rounded-btn bg-black object-cover" />
-              <p className="text-xs text-slate-300">{(clip.durationMs / 1000).toFixed(1)}s</p>
-              <p className={`text-xs ${clip.quality === "valid" ? "text-secondary" : "text-accent"}`}>
-                {clip.quality === "valid" ? "Quality: OK" : "Quality: low"}
-              </p>
-              {clip.quality === "low" && clip.qualityReasons.length > 0 && (
-                <p className="mt-1 text-[11px] text-slate-400">{clip.qualityReasons.join(" · ")}</p>
-              )}
-              <button className="mt-2 w-full rounded-btn bg-slate-700 px-2 py-1 text-xs" onClick={() => removeClip(clip.id)}>
-                Remove
-              </button>
-            </article>
+            <ClipPreview
+              key={clip.id}
+              url={clip.url}
+              durationMs={clip.durationMs}
+              quality={clip.quality}
+              qualityReasons={clip.qualityReasons}
+              onRemove={() => removeClip(clip.id)}
+            />
           ))}
         </div>
       )}
