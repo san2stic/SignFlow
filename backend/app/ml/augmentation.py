@@ -85,6 +85,62 @@ def speed_variation(sequence: np.ndarray, speed_factor: float | None = None) -> 
     return augmented
 
 
+def random_frame_dropout(sequence: np.ndarray, drop_ratio: float = 0.1) -> np.ndarray:
+    """Drop random frames to emulate transient tracking failures."""
+    if len(sequence) == 0 or drop_ratio <= 0:
+        return sequence
+    dropped = sequence.copy()
+    num_frames = dropped.shape[0]
+    num_drop = max(1, int(num_frames * drop_ratio))
+    indices = np.random.choice(num_frames, size=min(num_drop, num_frames), replace=False)
+    dropped[indices] = 0.0
+    return dropped
+
+
+def temporal_cutout(sequence: np.ndarray, max_ratio: float = 0.2) -> np.ndarray:
+    """Zero a contiguous temporal span to improve temporal robustness."""
+    if len(sequence) < 4 or max_ratio <= 0:
+        return sequence
+    cutout = sequence.copy()
+    num_frames = cutout.shape[0]
+    max_len = max(1, int(num_frames * max_ratio))
+    span = np.random.randint(1, max_len + 1)
+    start = np.random.randint(0, max(1, num_frames - span + 1))
+    cutout[start : start + span] = 0.0
+    return cutout
+
+
+def temporal_crop(sequence: np.ndarray, min_ratio: float = 0.7) -> np.ndarray:
+    """
+    Take a random temporal sub-segment and resample to original length.
+
+    Simulates variations in sign start/end timing.
+
+    Args:
+        sequence: Input [num_frames, num_features]
+        min_ratio: Minimum ratio of frames to keep (0.7 = 70%)
+
+    Returns:
+        Resampled sequence with same shape as input
+    """
+    num_frames = sequence.shape[0]
+    if num_frames < 4:
+        return sequence
+
+    ratio = np.random.uniform(min_ratio, 1.0)
+    crop_len = max(2, int(num_frames * ratio))
+    max_start = num_frames - crop_len
+    start = np.random.randint(0, max(1, max_start + 1))
+    cropped = sequence[start:start + crop_len]
+
+    if cropped.shape[0] == num_frames:
+        return cropped
+
+    # Resample back to original length
+    from app.ml.dataset import temporal_resample
+    return temporal_resample(cropped, target_len=num_frames)
+
+
 def swap_hands(sequence: np.ndarray) -> np.ndarray:
     """
     Swap left and right hand landmarks.
@@ -137,9 +193,13 @@ def apply_augmentations(
         # Default augmentation pipeline
         augmentations = [
             mirror_horizontal,
+            swap_hands,
             lambda seq: temporal_jitter(seq, max_shift=5),
             lambda seq: gaussian_noise(seq, sigma=0.01),
             lambda seq: speed_variation(seq, speed_factor=None),
+            lambda seq: random_frame_dropout(seq, drop_ratio=0.1),
+            lambda seq: temporal_cutout(seq, max_ratio=0.2),
+            lambda seq: temporal_crop(seq, min_ratio=0.7),
         ]
 
     augmented = sequence.copy()
@@ -148,7 +208,7 @@ def apply_augmentations(
         if np.random.random() < probability:
             augmented = aug_fn(augmented)
 
-    return augmented
+    return np.nan_to_num(augmented, nan=0.0, posinf=0.0, neginf=0.0).astype(sequence.dtype, copy=False)
 
 
 def augment_dataset(

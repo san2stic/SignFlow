@@ -34,7 +34,7 @@ def test_expand_classifier_head_preserves_existing_weights() -> None:
 
 def test_freeze_transformer_encoder_layers_freezes_first_three() -> None:
     """Few-shot freezing should affect encoder layers 0-2 and keep layer 3 trainable."""
-    model = SignTransformer(num_features=225, num_classes=3)
+    model = SignTransformer(num_features=225, num_classes=3, num_layers=4)
     frozen_count = freeze_transformer_encoder_layers(model, freeze_until_layer=3)
 
     assert frozen_count == 3

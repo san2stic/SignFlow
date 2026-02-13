@@ -2,17 +2,20 @@
 
 from __future__ import annotations
 
+import contextlib
+import math
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
+import numpy as np
 import structlog
 import torch
 import torch.nn as nn
 from torch.optim import AdamW
-from torch.optim.lr_scheduler import CosineAnnealingLR
-from torch.utils.data import DataLoader
+from torch.optim.lr_scheduler import LambdaLR
+from torch.utils.data import DataLoader, WeightedRandomSampler
 
 from app.ml.dataset import LandmarkDataset
 from app.ml.model import SignTransformer
@@ -28,12 +31,28 @@ class TrainingConfig:
     learning_rate: float = 1e-4
     batch_size: int = 32
     num_workers: int = 2
-    device: str = "cpu"  # "cpu" or "cuda"
-    early_stopping_patience: int = 10
+    device: str = "cpu"  # "cpu" or "cuda" or "mps"
+    early_stopping_patience: int = 15       # was 10
+    early_stopping_min_delta: float = 1e-4
     gradient_clip_max_norm: float = 1.0
-    use_focal_loss: bool = False  # For few-shot learning
+
+    weight_decay: float = 0.05              # was 0.01
+    classifier_lr_multiplier: float = 2.0
+    label_smoothing: float = 0.1            # was 0.05
+
+    use_focal_loss: bool = False  # Useful for few-shot learning
     focal_loss_gamma: float = 2.0
     focal_loss_alpha: float = 0.25
+
+    warmup_epochs: int = 3                  # was 5
+    use_class_weights: bool = True
+    use_weighted_sampler: bool = True
+
+    use_mixup: bool = True                  # was False
+    mixup_alpha: float = 0.3               # was 0.2
+
+    use_ema: bool = True
+    ema_decay: float = 0.995
 
 
 @dataclass
@@ -52,11 +71,18 @@ class TrainingMetrics:
 class FocalLoss(nn.Module):
     """Focal Loss for handling class imbalance in few-shot learning."""
 
-    def __init__(self, alpha: float = 0.25, gamma: float = 2.0):
+    def __init__(
+        self,
+        alpha: float = 0.25,
+        gamma: float = 2.0,
+        class_weights: torch.Tensor | None = None,
+        label_smoothing: float = 0.0,
+    ):
         super().__init__()
         self.alpha = alpha
         self.gamma = gamma
-        self.ce_loss = nn.CrossEntropyLoss(reduction="none")
+        self.class_weights = class_weights
+        self.label_smoothing = label_smoothing
 
     def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
         """
@@ -69,10 +95,27 @@ class FocalLoss(nn.Module):
         Returns:
             Scalar loss value
         """
-        ce_loss = self.ce_loss(logits, targets)
-        pt = torch.exp(-ce_loss)  # Probability of correct class
-        focal_loss = self.alpha * (1 - pt) ** self.gamma * ce_loss
-        return focal_loss.mean()
+        log_probs = torch.nn.functional.log_softmax(logits, dim=1)
+        probs = log_probs.exp()
+
+        num_classes = logits.size(1)
+        with torch.no_grad():
+            true_dist = torch.zeros_like(logits)
+            true_dist.fill_(self.label_smoothing / max(1, num_classes - 1))
+            true_dist.scatter_(1, targets.unsqueeze(1), 1.0 - self.label_smoothing)
+
+        ce = -(true_dist * log_probs).sum(dim=1)
+        pt = probs.gather(1, targets.unsqueeze(1)).squeeze(1).clamp(1e-6, 1.0)
+        focal_factor = (1 - pt) ** self.gamma
+        alpha_factor = torch.full_like(pt, self.alpha)
+
+        if self.class_weights is not None:
+            sample_weights = self.class_weights.to(logits.device)[targets]
+        else:
+            sample_weights = torch.ones_like(pt)
+
+        loss = alpha_factor * focal_factor * ce * sample_weights
+        return loss.mean()
 
 
 class SignTrainer:
@@ -103,31 +146,210 @@ class SignTrainer:
         self.device = torch.device(config.device)
         self.model.to(self.device)
 
-        # Loss function
-        if config.use_focal_loss:
-            self.criterion = FocalLoss(
-                alpha=config.focal_loss_alpha, gamma=config.focal_loss_gamma
-            )
-        else:
-            self.criterion = nn.CrossEntropyLoss()
+        # Loss function (initialized in fit once class distribution is known)
+        self.criterion: nn.Module = nn.CrossEntropyLoss(label_smoothing=self.config.label_smoothing)
 
-        # Optimizer and scheduler
-        self.optimizer = AdamW(
-            self.model.parameters(),
-            lr=config.learning_rate,
-            weight_decay=0.01,
-        )
-        self.scheduler = CosineAnnealingLR(
+        # Optimizer with differential learning rates (faster adaptation for classifier)
+        classifier_params = list(self.model.classifier.parameters())
+        classifier_param_ids = {id(parameter) for parameter in classifier_params}
+        backbone_params = [
+            parameter
+            for parameter in self.model.parameters()
+            if id(parameter) not in classifier_param_ids and parameter.requires_grad
+        ]
+        optimizer_groups = []
+        if backbone_params:
+            optimizer_groups.append(
+                {
+                    "params": backbone_params,
+                    "lr": self.config.learning_rate,
+                    "weight_decay": self.config.weight_decay,
+                }
+            )
+        if classifier_params:
+            optimizer_groups.append(
+                {
+                    "params": classifier_params,
+                    "lr": self.config.learning_rate * self.config.classifier_lr_multiplier,
+                    "weight_decay": self.config.weight_decay,
+                }
+            )
+        self.optimizer = AdamW(optimizer_groups if optimizer_groups else self.model.parameters())
+
+        # Scheduler with warmup + cosine decay.
+        self.scheduler = LambdaLR(
             self.optimizer,
-            T_max=config.num_epochs,
-            eta_min=config.learning_rate * 0.01,
+            lr_lambda=self._build_lr_lambda(
+                num_epochs=max(1, self.config.num_epochs),
+                warmup_epochs=max(0, self.config.warmup_epochs),
+            ),
         )
 
         # Training state
         self.best_val_loss = float("inf")
-        self.best_model_state = None
+        self.best_model_state: dict[str, torch.Tensor] | None = None
         self.epochs_without_improvement = 0
         self.metrics_history: list[TrainingMetrics] = []
+
+        # EMA state (helps stabilization for few-shot and noisy samples).
+        self.ema_state: dict[str, torch.Tensor] | None = None
+        if self.config.use_ema:
+            self.ema_state = {
+                name: parameter.detach().clone()
+                for name, parameter in self.model.named_parameters()
+                if parameter.requires_grad
+            }
+
+    @staticmethod
+    def _build_lr_lambda(num_epochs: int, warmup_epochs: int) -> Callable[[int], float]:
+        """Create warmup + cosine scheduler lambda."""
+        warmup_epochs = min(warmup_epochs, max(0, num_epochs - 1))
+
+        def lr_lambda(epoch_idx: int) -> float:
+            step = epoch_idx + 1
+            if warmup_epochs > 0 and step <= warmup_epochs:
+                return step / float(warmup_epochs)
+
+            cosine_steps = max(1, num_epochs - warmup_epochs)
+            progress = (step - warmup_epochs) / float(cosine_steps)
+            progress = min(max(progress, 0.0), 1.0)
+            min_ratio = 0.05
+            return min_ratio + (1.0 - min_ratio) * 0.5 * (1.0 + math.cos(math.pi * progress))
+
+        return lr_lambda
+
+    @staticmethod
+    def _class_distribution(dataset: LandmarkDataset) -> tuple[np.ndarray, np.ndarray]:
+        """Return class ids and counts from processed dataset."""
+        labels = [int(label) for _sequence, label in dataset.processed_samples]
+        if not labels:
+            return np.array([], dtype=np.int64), np.array([], dtype=np.int64)
+        return np.unique(np.array(labels, dtype=np.int64), return_counts=True)
+
+    def _configure_criterion(self, train_dataset: LandmarkDataset) -> None:
+        """Configure criterion using class weights from train set if requested."""
+        class_weights_tensor: torch.Tensor | None = None
+        class_ids, counts = self._class_distribution(train_dataset)
+        if self.config.use_class_weights and len(class_ids) > 0:
+            num_classes = self.model.num_classes
+            weights = np.ones((num_classes,), dtype=np.float32)
+            inv = 1.0 / np.maximum(counts.astype(np.float32), 1.0)
+            inv = inv / max(inv.mean(), 1e-6)
+            for class_id, value in zip(class_ids.tolist(), inv.tolist()):
+                if 0 <= class_id < num_classes:
+                    weights[class_id] = float(value)
+            class_weights_tensor = torch.from_numpy(weights).to(self.device)
+
+        if self.config.use_focal_loss:
+            self.criterion = FocalLoss(
+                alpha=self.config.focal_loss_alpha,
+                gamma=self.config.focal_loss_gamma,
+                class_weights=class_weights_tensor,
+                label_smoothing=self.config.label_smoothing,
+            )
+        else:
+            self.criterion = nn.CrossEntropyLoss(
+                weight=class_weights_tensor,
+                label_smoothing=self.config.label_smoothing,
+            )
+
+    def _build_train_loader(self, train_dataset: LandmarkDataset) -> DataLoader:
+        """Build training dataloader with optional class-balanced sampler."""
+        sampler = None
+        shuffle = True
+
+        if self.config.use_weighted_sampler and len(train_dataset) > 0:
+            class_ids, counts = self._class_distribution(train_dataset)
+            if len(class_ids) > 0:
+                class_to_weight = {
+                    int(class_id): float(1.0 / max(1, count))
+                    for class_id, count in zip(class_ids.tolist(), counts.tolist())
+                }
+                sample_weights = [
+                    class_to_weight.get(int(label), 1.0)
+                    for _sequence, label in train_dataset.processed_samples
+                ]
+                sampler = WeightedRandomSampler(
+                    weights=torch.tensor(sample_weights, dtype=torch.double),
+                    num_samples=len(sample_weights),
+                    replacement=True,
+                )
+                shuffle = False
+
+        return DataLoader(
+            train_dataset,
+            batch_size=self.config.batch_size,
+            shuffle=shuffle,
+            sampler=sampler,
+            num_workers=self.config.num_workers,
+            pin_memory=self.device.type == "cuda",
+            persistent_workers=self.config.num_workers > 0,
+        )
+
+    def _mixup_batch(
+        self,
+        landmarks: torch.Tensor,
+        labels: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, float]:
+        """Apply mixup on batch."""
+        alpha = max(self.config.mixup_alpha, 1e-6)
+        lam = float(np.random.beta(alpha, alpha))
+        permutation = torch.randperm(landmarks.size(0), device=landmarks.device)
+
+        mixed_landmarks = lam * landmarks + (1.0 - lam) * landmarks[permutation]
+        labels_a = labels
+        labels_b = labels[permutation]
+        return mixed_landmarks, labels_a, labels_b, lam
+
+    def _compute_mixup_loss(
+        self,
+        logits: torch.Tensor,
+        labels_a: torch.Tensor,
+        labels_b: torch.Tensor,
+        lam: float,
+    ) -> torch.Tensor:
+        """Compute criterion under mixup target interpolation."""
+        return (lam * self.criterion(logits, labels_a)) + ((1.0 - lam) * self.criterion(logits, labels_b))
+
+    def _update_ema(self) -> None:
+        """Update exponential moving average of trainable parameters."""
+        if self.ema_state is None:
+            return
+        decay = self.config.ema_decay
+        with torch.no_grad():
+            for name, parameter in self.model.named_parameters():
+                if not parameter.requires_grad:
+                    continue
+                if name not in self.ema_state:
+                    self.ema_state[name] = parameter.detach().clone()
+                    continue
+                self.ema_state[name].mul_(decay).add_(parameter.detach(), alpha=(1.0 - decay))
+
+    @contextlib.contextmanager
+    def _swap_to_ema_weights(self):
+        """Temporarily swap model weights to EMA values during evaluation."""
+        if self.ema_state is None:
+            yield
+            return
+
+        backup = {
+            name: parameter.detach().clone()
+            for name, parameter in self.model.named_parameters()
+            if parameter.requires_grad and name in self.ema_state
+        }
+
+        with torch.no_grad():
+            for name, parameter in self.model.named_parameters():
+                if parameter.requires_grad and name in self.ema_state:
+                    parameter.copy_(self.ema_state[name])
+
+        try:
+            yield
+        finally:
+            with torch.no_grad():
+                for name, parameter in self.model.named_parameters():
+                    if parameter.requires_grad and name in backup:
+                        parameter.copy_(backup[name])
 
     def train_epoch(self, dataloader: DataLoader) -> tuple[float, float]:
         """
@@ -141,20 +363,33 @@ class SignTrainer:
         """
         self.model.train()
         total_loss = 0.0
-        correct = 0
+        correct = 0.0
         total = 0
+        steps = 0
 
-        for batch_idx, (landmarks, labels) in enumerate(dataloader):
+        for landmarks, labels in dataloader:
             # Move to device
             landmarks = landmarks.to(self.device)  # [batch, seq_len, features]
             labels = labels.to(self.device)  # [batch]
 
             # Forward pass
             self.optimizer.zero_grad()
-            logits = self.model(landmarks)  # [batch, num_classes]
 
-            # Compute loss
-            loss = self.criterion(logits, labels)
+            if self.config.use_mixup and labels.size(0) >= 2:
+                mixed_landmarks, labels_a, labels_b, lam = self._mixup_batch(landmarks, labels)
+                logits = self.model(mixed_landmarks)
+                loss = self._compute_mixup_loss(logits, labels_a, labels_b, lam)
+                predictions = torch.argmax(logits, dim=1)
+                # Soft accuracy estimate under mixed labels.
+                batch_correct = lam * (predictions == labels_a).sum().item() + (1.0 - lam) * (
+                    predictions == labels_b
+                ).sum().item()
+                correct += float(batch_correct)
+            else:
+                logits = self.model(landmarks)  # [batch, num_classes]
+                loss = self.criterion(logits, labels)
+                predictions = torch.argmax(logits, dim=1)
+                correct += float((predictions == labels).sum().item())
 
             # Backward pass
             loss.backward()
@@ -166,19 +401,19 @@ class SignTrainer:
             )
 
             self.optimizer.step()
+            self._update_ema()
 
             # Metrics
-            total_loss += loss.item()
-            predictions = torch.argmax(logits, dim=1)
-            correct += (predictions == labels).sum().item()
-            total += labels.size(0)
+            total_loss += float(loss.item())
+            total += int(labels.size(0))
+            steps += 1
 
             # Check stop signal
             if self.stop_signal and self.stop_signal():
                 logger.info("training_interrupted_by_stop_signal")
                 break
 
-        avg_loss = total_loss / len(dataloader) if len(dataloader) > 0 else 0.0
+        avg_loss = total_loss / steps if steps > 0 else 0.0
         accuracy = correct / total if total > 0 else 0.0
 
         return avg_loss, accuracy
@@ -197,8 +432,9 @@ class SignTrainer:
         total_loss = 0.0
         correct = 0
         total = 0
+        steps = 0
 
-        with torch.no_grad():
+        with self._swap_to_ema_weights(), torch.no_grad():
             for landmarks, labels in dataloader:
                 # Move to device
                 landmarks = landmarks.to(self.device)
@@ -211,12 +447,13 @@ class SignTrainer:
                 loss = self.criterion(logits, labels)
 
                 # Metrics
-                total_loss += loss.item()
+                total_loss += float(loss.item())
                 predictions = torch.argmax(logits, dim=1)
-                correct += (predictions == labels).sum().item()
-                total += labels.size(0)
+                correct += int((predictions == labels).sum().item())
+                total += int(labels.size(0))
+                steps += 1
 
-        avg_loss = total_loss / len(dataloader) if len(dataloader) > 0 else 0.0
+        avg_loss = total_loss / steps if steps > 0 else 0.0
         accuracy = correct / total if total > 0 else 0.0
 
         return avg_loss, accuracy
@@ -244,21 +481,17 @@ class SignTrainer:
             batch_size=self.config.batch_size,
         )
 
-        # Create dataloaders
-        train_loader = DataLoader(
-            train_dataset,
-            batch_size=self.config.batch_size,
-            shuffle=True,
-            num_workers=self.config.num_workers,
-            pin_memory=self.device.type == "cuda",
-        )
+        self._configure_criterion(train_dataset)
 
+        # Create dataloaders
+        train_loader = self._build_train_loader(train_dataset)
         val_loader = DataLoader(
             val_dataset,
             batch_size=self.config.batch_size,
             shuffle=False,
             num_workers=self.config.num_workers,
             pin_memory=self.device.type == "cuda",
+            persistent_workers=self.config.num_workers > 0,
         )
 
         # Training loop
@@ -278,7 +511,7 @@ class SignTrainer:
 
             # Scheduler step
             self.scheduler.step()
-            current_lr = self.optimizer.param_groups[0]["lr"]
+            current_lr = float(self.optimizer.param_groups[0]["lr"])
 
             # Metrics
             epoch_duration = time.time() - epoch_start
@@ -309,9 +542,15 @@ class SignTrainer:
                 self.progress_callback(metrics)
 
             # Early stopping check
-            if val_loss < self.best_val_loss:
+            improved = val_loss < (self.best_val_loss - self.config.early_stopping_min_delta)
+            if improved:
                 self.best_val_loss = val_loss
-                self.best_model_state = self.model.state_dict().copy()
+                # Store the EMA-smoothed weights when enabled.
+                with self._swap_to_ema_weights():
+                    self.best_model_state = {
+                        key: value.detach().cpu().clone()
+                        for key, value in self.model.state_dict().items()
+                    }
                 self.epochs_without_improvement = 0
                 logger.debug("new_best_model", val_loss=val_loss)
             else:
@@ -352,11 +591,21 @@ class SignTrainer:
             "num_classes": self.model.num_classes,
             "num_features": self.model.num_features,
             "d_model": self.model.d_model,
+            "nhead": self.model.nhead,
+            "num_layers": self.model.num_layers,
+            "use_cls_token": getattr(self.model, "use_cls_token", True),
             "class_labels": class_labels or [],
             "config": {
                 "num_epochs": self.config.num_epochs,
                 "learning_rate": self.config.learning_rate,
                 "batch_size": self.config.batch_size,
+                "weight_decay": self.config.weight_decay,
+                "label_smoothing": self.config.label_smoothing,
+                "warmup_epochs": self.config.warmup_epochs,
+                "use_mixup": self.config.use_mixup,
+                "mixup_alpha": self.config.mixup_alpha,
+                "use_ema": self.config.use_ema,
+                "ema_decay": self.config.ema_decay,
             },
             "metrics_history": [
                 {
@@ -398,15 +647,27 @@ def load_model_checkpoint(checkpoint_path: str | Path, device: str = "cpu") -> S
     try:
         checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
 
-        # Create model with saved architecture
+        # Create model with saved architecture.
         model = SignTransformer(
             num_features=checkpoint.get("num_features", 225),
             num_classes=checkpoint["num_classes"],
             d_model=checkpoint.get("d_model", 256),
+            nhead=checkpoint.get("nhead", 8),
+            num_layers=checkpoint.get("num_layers", 4),
+            use_cls_token=checkpoint.get("use_cls_token", True),
         )
 
-        # Load weights
-        model.load_state_dict(checkpoint["model_state_dict"])
+        # Load weights (strict first, fallback for backward compatibility).
+        try:
+            model.load_state_dict(checkpoint["model_state_dict"], strict=True)
+        except RuntimeError as strict_error:
+            logger.warning(
+                "checkpoint_strict_load_failed_falling_back",
+                path=str(checkpoint_path),
+                error=str(strict_error),
+            )
+            model.load_state_dict(checkpoint["model_state_dict"], strict=False)
+
         model.set_inference_mode()
 
         logger.info(
