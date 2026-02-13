@@ -21,6 +21,7 @@ interface LabelingStore {
   selectVideo: (video: UnlabeledVideo | null) => void;
   labelVideo: (videoId: string, signId: string) => Promise<void>;
   applySuggestions: (videoIds: string[], signId: string) => Promise<void>;
+  clearSuggestions: () => void;
   refreshAfterLabel: () => Promise<void>;
   addToRecentSigns: (sign: Sign) => void;
 }
@@ -98,6 +99,8 @@ export const useLabelingStore = create<LabelingStore>((set, get) => ({
       throw error;
     }
   },
+
+  clearSuggestions: () => set({ suggestions: [] }),
 
   refreshAfterLabel: async () => {
     set({ selectedVideo: null, suggestions: [] });

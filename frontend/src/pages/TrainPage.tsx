@@ -8,6 +8,7 @@ import { useLabelingStore } from "../stores/labelingStore";
 import { VideoGrid } from "../components/labeling/VideoGrid";
 import { LabelingModal } from "../components/labeling/LabelingModal";
 import { SignSelector } from "../components/labeling/SignSelector";
+import { SuggestionView } from "../components/labeling/SuggestionView";
 import { Sign } from "../api/signs";
 
 interface TrainPageLocationState {
@@ -23,7 +24,18 @@ export function TrainPage(): JSX.Element {
   const location = useLocation();
   const { videoRef, attachVideoRef } = useCamera();
   const [activeTab, setActiveTab] = useState<"record" | "label">("record");
-  const { unlabeledVideos, selectedVideo, selectVideo, labelVideo, loadUnlabeledVideos, recentSigns, addToRecentSigns } = useLabelingStore();
+  const {
+    unlabeledVideos,
+    selectedVideo,
+    selectVideo,
+    labelVideo,
+    loadUnlabeledVideos,
+    recentSigns,
+    addToRecentSigns,
+    suggestions,
+    applySuggestions,
+    clearSuggestions
+  } = useLabelingStore();
   const [selectedSignForLabeling, setSelectedSignForLabeling] = useState<string | null>(null);
 
   const initialAssignedSign = useMemo(() => {
@@ -75,6 +87,20 @@ export function TrainPage(): JSX.Element {
           }}
         />
       </LabelingModal>
+
+      {suggestions.length > 0 && selectedSignForLabeling && (
+        <SuggestionView
+          suggestions={suggestions}
+          signName={
+            recentSigns.find((s) => s.id === selectedSignForLabeling)?.name || "this sign"
+          }
+          onApply={async (videoIds) => {
+            await applySuggestions(videoIds, selectedSignForLabeling);
+            clearSuggestions();
+          }}
+          onSkip={() => clearSuggestions()}
+        />
+      )}
     </div>
   );
 }
