@@ -1,0 +1,76 @@
+services:
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - frontend
+      - backend
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.prod
+    restart: unless-stopped
+
+  backend:
+    build: ./backend
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
+    restart: unless-stopped
+    volumes:
+      - ./backend/data:/app/data
+    environment:
+      - ENV=production
+      - DATABASE_URL=postgresql+psycopg://signflow:signflow@db:5432/signflow
+      - REDIS_URL=redis://redis:6379/0
+      - MODEL_DIR=/app/data/models
+      - VIDEO_DIR=/app/data/videos
+      - EXPORT_DIR=/app/data/exports
+      - CORS_ORIGINS=https://${SIGNFLOW_DOMAIN:-localhost},http://${SIGNFLOW_DOMAIN:-localhost}
+      - TRAINING_USE_CELERY=true
+    depends_on:
+      - db
+      - redis
+
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      - POSTGRES_DB=signflow
+      - POSTGRES_USER=signflow
+      - POSTGRES_PASSWORD=signflow
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+
+  celery_worker:
+    build: ./backend
+    command: celery -A app.celery_app worker -l info -Q training
+    restart: unless-stopped
+    volumes:
+      - ./backend/data:/app/data
+    environment:
+      - ENV=production
+      - DATABASE_URL=postgresql+psycopg://signflow:signflow@db:5432/signflow
+      - REDIS_URL=redis://redis:6379/0
+      - MODEL_DIR=/app/data/models
+      - VIDEO_DIR=/app/data/videos
+      - EXPORT_DIR=/app/data/exports
+      - TRAINING_USE_CELERY=true
+    depends_on:
+      - db
+      - redis
+
+volumes:
+  pgdata:
+  caddy_data:
+  caddy_config:

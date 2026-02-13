@@ -1,0 +1,68 @@
+services:
+  backend:
+    build: ./backend
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend/data:/app/data
+      - ./backend/app:/app/app
+    environment:
+      - DATABASE_URL=postgresql+psycopg://signflow:signflow@db:5432/signflow
+      - REDIS_URL=redis://redis:6379/0
+      - MODEL_DIR=/app/data/models
+      - VIDEO_DIR=/app/data/videos
+      - EXPORT_DIR=/app/data/exports
+      - CORS_ORIGINS=http://localhost:3000
+      - TRAINING_USE_CELERY=true
+    depends_on:
+      - db
+      - redis
+
+  frontend:
+    build: ./frontend
+    command: sh -c "npm install && npm run dev -- --host 0.0.0.0 --port 3000"
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    environment:
+      - VITE_API_URL=http://localhost:8000
+      - VITE_WS_URL=ws://localhost:8000
+
+  db:
+    image: postgres:16-alpine
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    environment:
+      - POSTGRES_DB=signflow
+      - POSTGRES_USER=signflow
+      - POSTGRES_PASSWORD=signflow
+    ports:
+      - "5432:5432"
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+
+  celery_worker:
+    build: ./backend
+    command: celery -A app.celery_app worker -l info -Q training
+    volumes:
+      - ./backend/data:/app/data
+      - ./backend/app:/app/app
+    environment:
+      - DATABASE_URL=postgresql+psycopg://signflow:signflow@db:5432/signflow
+      - REDIS_URL=redis://redis:6379/0
+      - MODEL_DIR=/app/data/models
+      - VIDEO_DIR=/app/data/videos
+      - EXPORT_DIR=/app/data/exports
+      - TRAINING_USE_CELERY=true
+    depends_on:
+      - redis
+      - db
+
+volumes:
+  pgdata:
