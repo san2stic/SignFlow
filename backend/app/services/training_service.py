@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+from multiprocessing import current_process
 from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -53,6 +54,17 @@ class TrainingService:
         if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
             return "mps"
         return "cpu"
+
+    @staticmethod
+    def _resolve_dataloader_workers(default_workers: int = 2) -> int:
+        """Avoid DataLoader child processes when already inside a daemon worker process."""
+        workers = max(0, int(default_workers))
+        try:
+            if current_process().daemon:
+                return 0
+        except Exception:  # noqa: BLE001
+            pass
+        return workers
 
     @staticmethod
     def _stratified_train_val_indices(
@@ -196,9 +208,13 @@ class TrainingService:
     def _enqueue_celery_job(self, session_id: str) -> bool:
         """Try to queue training job on Celery; return False on dispatch failure."""
         try:
-            from app.tasks.training_tasks import run_training_session_task
+            from app.celery_app import celery_app
 
-            run_training_session_task.delay(session_id)
+            celery_app.send_task(
+                "app.tasks.training.run_training_session",
+                args=[session_id],
+                queue="training",
+            )
             logger.info("training_session_enqueued_celery", session_id=session_id)
             return True
         except Exception as exc:  # noqa: BLE001
@@ -399,7 +415,7 @@ class TrainingService:
                         config.get("learning_rate", 1e-4 if mode == "few-shot" else 3e-4)
                     ),
                     batch_size=32,
-                    num_workers=2,
+                    num_workers=self._resolve_dataloader_workers(int(config.get("num_workers", 2))),
                     device=device,
                     early_stopping_patience=int(config.get("early_stopping_patience", 15)),
                     early_stopping_min_delta=float(config.get("early_stopping_min_delta", 1e-4)),
