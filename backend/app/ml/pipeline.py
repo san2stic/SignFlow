@@ -83,7 +83,7 @@ class SignFlowInferencePipeline:
         self.hand_visibility_history: deque[float] = deque(maxlen=seq_len)
         self.motion_history: deque[float] = deque(maxlen=seq_len)
         self.prediction_history: deque[tuple[str, float]] = deque(maxlen=max(3, smoothing_window))
-        self.labels: list[str] = ["NONE"]
+        self.labels: list[str] = []
         self.sentence_tokens: list[str] = []
         self._current_motion_energy = 0.0
 
@@ -130,7 +130,27 @@ class SignFlowInferencePipeline:
         Args:
             labels: List of sign labels (class names)
         """
-        self.labels = ["NONE", *[label for label in labels if label != "NONE"]]
+        cleaned = [label for label in labels if label]
+        non_none = [label for label in cleaned if label != "NONE"]
+
+        if self.model is None:
+            self.labels = non_none
+            logger.debug("labels_set", num_labels=len(self.labels))
+            return
+
+        expected = int(self.model.num_classes)
+        aligned = non_none
+        if len(aligned) != expected:
+            logger.warning(
+                "label_count_mismatch",
+                expected=expected,
+                provided=len(aligned),
+            )
+            aligned = aligned[:expected]
+            while len(aligned) < expected:
+                aligned.append(f"class_{len(aligned)}")
+
+        self.labels = aligned
         logger.debug("labels_set", num_labels=len(self.labels))
 
     def process_frame(self, payload: dict) -> Prediction:
@@ -269,7 +289,7 @@ class SignFlowInferencePipeline:
             Tuple of (prediction_label, confidence, alternatives)
         """
         # If no model loaded, return NONE
-        if self.model is None or len(self.labels) <= 1:
+        if self.model is None or len(self.labels) == 0:
             return "NONE", 0.0, []
 
         try:
@@ -287,13 +307,25 @@ class SignFlowInferencePipeline:
             top_k = min(4, len(probs))  # Get top 4 predictions
             top_indices = np.argsort(probs)[-top_k:][::-1]
 
+            if len(self.labels) != len(probs):
+                logger.warning(
+                    "runtime_label_mismatch",
+                    model_classes=len(probs),
+                    labels=len(self.labels),
+                )
+                runtime_labels = self.labels[: len(probs)]
+                while len(runtime_labels) < len(probs):
+                    runtime_labels.append(f"class_{len(runtime_labels)}")
+            else:
+                runtime_labels = self.labels
+
             # Main prediction
             pred_idx = int(top_indices[0])
             raw_confidence = float(probs[pred_idx])
 
             # Map index to label
-            if pred_idx < len(self.labels):
-                prediction = self.labels[pred_idx]
+            if pred_idx < len(runtime_labels):
+                prediction = runtime_labels[pred_idx]
             else:
                 prediction = "NONE"
                 raw_confidence = 0.0
@@ -301,8 +333,8 @@ class SignFlowInferencePipeline:
             # Alternatives (top 3 excluding main prediction)
             alternatives = []
             for idx in top_indices[1:top_k]:
-                if idx < len(self.labels):
-                    alt_label = self.labels[idx]
+                if idx < len(runtime_labels):
+                    alt_label = runtime_labels[idx]
                     alt_conf = float(probs[idx])
                     alternatives.append({
                         "sign": alt_label,

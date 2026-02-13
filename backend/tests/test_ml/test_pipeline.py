@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import numpy as np
+import torch
+
 from app.ml.pipeline import SignFlowInferencePipeline
 
 
@@ -56,3 +59,24 @@ def test_pipeline_rejects_predictions_when_hands_not_visible() -> None:
     assert output.prediction == "NONE"
     assert output.confidence == 0.0
     assert output.alternatives == []
+
+
+def test_pipeline_single_class_label_mapping_has_no_none_offset() -> None:
+    """Single-class models should map index 0 to the provided sign label."""
+
+    class _SingleClassModel(torch.nn.Module):
+        num_classes = 1
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            return torch.tensor([[8.0]], device=x.device)
+
+    pipeline = SignFlowInferencePipeline(seq_len=30)
+    pipeline.model = _SingleClassModel()
+    pipeline.set_labels(["lsfb_bonjour"])
+
+    window = np.zeros((30, 469), dtype=np.float32)
+    prediction, confidence, alternatives = pipeline._infer_window(window)
+
+    assert prediction == "lsfb_bonjour"
+    assert confidence > 0.7
+    assert alternatives == []

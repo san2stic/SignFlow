@@ -45,6 +45,6 @@ def test_pipeline_uses_model_class_labels_when_available() -> None:
         db.commit()
 
     pipeline = get_or_create_pipeline()
-    assert pipeline.labels[:3] == ["NONE", "lsfb_bonjour", "lsfb_merci"]
+    assert pipeline.labels[:2] == ["lsfb_bonjour", "lsfb_merci"]
 
     reload_pipeline()
