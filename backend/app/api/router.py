@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
-from app.api import dictionary, media, models, signs, stats, training, translate
+from app.api import dictionary, media, models, signs, stats, training, translate, videos
 
 api_router = APIRouter()
 api_router.include_router(translate.router, prefix="/translate", tags=["translate"])
@@ -14,3 +14,4 @@ api_router.include_router(training.router, prefix="/training", tags=["training"]
 api_router.include_router(models.router, prefix="/models", tags=["models"])
 api_router.include_router(dictionary.router, prefix="/dictionary", tags=["dictionary"])
 api_router.include_router(stats.router, prefix="/stats", tags=["stats"])
+api_router.include_router(videos.router, prefix="/videos", tags=["videos"])
