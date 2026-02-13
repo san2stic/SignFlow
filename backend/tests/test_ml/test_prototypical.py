@@ -35,12 +35,14 @@ def test_prototypical_fallback_returns_metrics_and_prototypes() -> None:
         sequence_length=12,
         stride=12,
         apply_sliding_window=False,
+        use_enriched_features=False,
     )
     val_dataset = LandmarkDataset(
         val_samples,
         sequence_length=12,
         stride=12,
         apply_sliding_window=False,
+        use_enriched_features=False,
     )
 
     model = SignTransformer(num_features=225, num_classes=2, d_model=32)

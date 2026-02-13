@@ -11,6 +11,8 @@ import torch
 from scipy import interpolate as scipy_interpolate
 from torch.utils.data import Dataset
 
+from app.ml.feature_engineering import compute_enriched_features
+
 logger = structlog.get_logger(__name__)
 
 
@@ -63,35 +65,39 @@ class LandmarkDataset(Dataset):
     def __init__(
         self,
         samples: list[SignSample],
-        sequence_length: int = 30,
+        sequence_length: int = 64,
         stride: int = 10,
-        apply_sliding_window: bool = True,
+        apply_sliding_window: bool = False,
+        use_enriched_features: bool = True,
     ) -> None:
         """
-        Initialize dataset with optional sliding window processing.
+        Initialize dataset with temporal resampling or sliding window processing.
 
         Args:
             samples: List of SignSample with landmarks and labels
-            sequence_length: Number of frames per sequence (default: 30 frames = 1 sec @ 30fps)
+            sequence_length: Number of frames per sequence (default: 64)
             stride: Stride for sliding window (default: 10 frames)
-            apply_sliding_window: If True, apply sliding window; if False, use full sequences
+            apply_sliding_window: If True, apply sliding window (legacy mode);
+                if False, use temporal resampling (new default)
+            use_enriched_features: If True, compute enriched features (469 dims)
+                after resampling; if False, keep raw 225-dim landmarks
         """
         self.sequence_length = sequence_length
         self.stride = stride
         self.apply_sliding_window = apply_sliding_window
+        self.use_enriched_features = use_enriched_features
 
-        # Process samples with sliding window
         self.processed_samples: list[tuple[torch.Tensor, int]] = []
 
         for sample in samples:
             if apply_sliding_window:
-                # Apply sliding window to create multiple sequences from one sample
                 sequences = self._create_sliding_windows(sample.landmarks, sample.label)
                 self.processed_samples.extend(sequences)
             else:
-                # Use full sequence with padding if needed
-                padded = self._pad_or_truncate(sample.landmarks)
-                tensor = torch.from_numpy(padded).float()
+                resampled = temporal_resample(sample.landmarks, target_len=sequence_length)
+                if use_enriched_features:
+                    resampled = compute_enriched_features(resampled)
+                tensor = torch.from_numpy(resampled).float()
                 self.processed_samples.append((tensor, sample.label))
 
         logger.debug(
@@ -99,7 +105,7 @@ class LandmarkDataset(Dataset):
             num_samples=len(samples),
             num_sequences=len(self.processed_samples),
             sequence_length=sequence_length,
-            stride=stride,
+            use_enriched_features=use_enriched_features,
         )
 
     def _create_sliding_windows(
