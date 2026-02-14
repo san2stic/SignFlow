@@ -356,6 +356,27 @@ class TrainingService:
             if len(generated) >= max_count:
                 return generated[:max_count]
 
+        # Retry with progressively relaxed thresholds for short or noisy clips.
+        relaxed_profiles = [
+            (0.0025, 10),
+            (0.0040, 8),
+            (0.0065, 6),
+        ]
+        for motion_threshold, min_len in relaxed_profiles:
+            if len(generated) >= max_count:
+                break
+            for sequence in labeled_sequences:
+                generated.extend(
+                    TrainingService._extract_rest_segments(
+                        sequence,
+                        motion_threshold=motion_threshold,
+                        min_len=min_len,
+                        max_segments=2,
+                    )
+                )
+                if len(generated) >= max_count:
+                    return generated[:max_count]
+
         for sequence in unlabeled_sequences:
             motion = TrainingService._compute_motion_signal(sequence)
             if motion.size == 0:
@@ -364,6 +385,32 @@ class TrainingService:
                 generated.append(sequence)
             if len(generated) >= max_count:
                 break
+
+        # Final fallback: synthesize low-motion windows from existing labeled clips.
+        # This prevents cold-start few-shot runs from failing when users only upload one sign class.
+        if len(generated) < max_count and labeled_sequences:
+            fallback_target = min(max_count, max(2, min(8, len(labeled_sequences))))
+            if len(generated) >= fallback_target:
+                return generated[:max_count]
+            rng = np.random.default_rng()
+            target_len = max(8, min(24, int(np.median([seq.shape[0] for seq in labeled_sequences]))))
+            sample_index = 0
+            max_attempts = fallback_target * 4
+            while len(generated) < fallback_target and sample_index < max_attempts:
+                source = labeled_sequences[sample_index % len(labeled_sequences)]
+                if source.ndim != 2 or source.shape[0] == 0:
+                    sample_index += 1
+                    continue
+                frame_idx = int(np.argmin(TrainingService._compute_motion_signal(source)))
+                anchor = source[frame_idx : frame_idx + 1].astype(np.float32, copy=True)
+                synthetic = np.repeat(anchor, repeats=target_len, axis=0)
+                if synthetic.shape[1] >= 126:
+                    # Pull hands closer to neutral to emulate idle posture.
+                    synthetic[:, :126] *= 0.2
+                noise = rng.normal(loc=0.0, scale=4e-4, size=synthetic.shape).astype(np.float32)
+                generated.append((synthetic + noise).astype(np.float32))
+                sample_index += 1
+
         return generated[:max_count]
 
     @staticmethod

@@ -17,6 +17,12 @@ def _make_sequences(num_samples: int) -> list[np.ndarray]:
     ]
 
 
+def _make_high_motion_sequence(length: int = 24, features: int = 225) -> np.ndarray:
+    """Create a sequence with no natural low-motion rest segment."""
+    base = np.linspace(0.0, 1.0, num=length * features, dtype=np.float32)
+    return base.reshape(length, features)
+
+
 def test_stratified_split_keeps_singleton_class_in_train() -> None:
     """A class with one sample should stay in train split (no impossible val holdout)."""
     labels = [0, 0, 1]  # class "1" is singleton
@@ -154,3 +160,29 @@ def test_validate_class_space_allows_multi_class_training() -> None:
         open_set_enabled=False,
         generated_none_count=0,
     )
+
+
+def test_generate_open_set_sequences_synthesizes_none_for_high_motion_single_class() -> None:
+    """Open-set generation should fallback to synthetic NONE windows when needed."""
+    generated = TrainingService._generate_open_set_sequences(
+        labeled_sequences=[_make_high_motion_sequence()],
+        unlabeled_sequences=[],
+        max_count=4,
+    )
+
+    assert 2 <= len(generated) <= 4
+    assert all(sample.shape[1] == 225 for sample in generated)
+    assert all(sample.shape[0] >= 8 for sample in generated)
+
+
+def test_generate_open_set_sequences_uses_low_motion_unlabeled_clip() -> None:
+    """Idle unlabeled clips should be accepted as NONE samples."""
+    idle = np.zeros((20, 225), dtype=np.float32)
+    generated = TrainingService._generate_open_set_sequences(
+        labeled_sequences=[],
+        unlabeled_sequences=[idle],
+        max_count=2,
+    )
+
+    assert len(generated) == 1
+    assert generated[0].shape == idle.shape
