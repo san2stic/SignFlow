@@ -4,6 +4,12 @@ export interface TrainingMetrics {
   loss: number;
   accuracy: number;
   val_accuracy: number;
+  macro_f1?: number;
+  target_sign_f1?: number | null;
+  open_set_fpr?: number | null;
+  latency_p95_ms?: number | null;
+  calibration_temperature?: number | null;
+  deployment_gate_passed?: boolean;
   current_epoch?: number;
 }
 
@@ -28,7 +34,18 @@ type TrainingStartPayload =
         epochs?: number;
         learning_rate?: number;
         augmentation?: boolean;
+        num_augmentations_per_sample?: number;
+        augmentation_probability?: number;
+        max_augmented_train_samples?: number;
         min_deploy_accuracy?: number;
+        quality_min_detection_rate?: number;
+        open_set_enabled?: boolean;
+        calibration_enabled?: boolean;
+        eval_repeats?: number;
+        use_distillation?: boolean;
+        distillation_alpha?: number;
+        distillation_temperature?: number;
+        teacher_model_path?: string;
       };
     }
   | {
@@ -38,7 +55,18 @@ type TrainingStartPayload =
         epochs?: number;
         learning_rate?: number;
         augmentation?: boolean;
+        num_augmentations_per_sample?: number;
+        augmentation_probability?: number;
+        max_augmented_train_samples?: number;
         min_deploy_accuracy?: number;
+        quality_min_detection_rate?: number;
+        open_set_enabled?: boolean;
+        calibration_enabled?: boolean;
+        eval_repeats?: number;
+        use_distillation?: boolean;
+        distillation_alpha?: number;
+        distillation_temperature?: number;
+        teacher_model_path?: string;
       };
     };
 

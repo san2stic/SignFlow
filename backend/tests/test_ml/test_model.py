@@ -42,12 +42,14 @@ from app.ml.feature_engineering import ENRICHED_FEATURE_DIM
 
 
 def test_model_reduced_defaults():
-    """New defaults should create a smaller model."""
+    """New defaults should expose the V2 architecture settings."""
     model = SignTransformer(num_classes=5)
-    assert model.d_model == 128
-    assert model.nhead == 4
-    assert model.num_layers == 2
+    assert model.d_model == 192
+    assert model.nhead == 6
+    assert model.num_layers == 4
     assert model.num_features == ENRICHED_FEATURE_DIM
+    assert model.use_multiscale_stem is True
+    assert model.use_cosine_head is True
 
 
 def test_model_forward_with_enriched_features():

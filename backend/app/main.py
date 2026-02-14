@@ -67,18 +67,38 @@ async def request_size_guard(request: Request, call_next):
 
 def ensure_runtime_schema() -> None:
     """Apply small runtime-safe schema patches for local SQLite compatibility."""
-    inspector = inspect(engine)
-    if "model_versions" not in inspector.get_table_names():
-        return
-
-    columns = {column["name"] for column in inspector.get_columns("model_versions")}
-    if "class_labels" in columns:
-        return
-
     with engine.begin() as connection:
-        connection.execute(
-            text("ALTER TABLE model_versions ADD COLUMN class_labels JSON NOT NULL DEFAULT '[]'")
-        )
+        inspector = inspect(connection)
+        table_names = inspector.get_table_names()
+        if "model_versions" in table_names:
+            model_columns = {column["name"] for column in inspector.get_columns("model_versions")}
+            if "class_labels" not in model_columns:
+                connection.execute(
+                    text("ALTER TABLE model_versions ADD COLUMN class_labels JSON NOT NULL DEFAULT '[]'")
+                )
+            if "metadata" not in model_columns:
+                connection.execute(
+                    text("ALTER TABLE model_versions ADD COLUMN metadata JSON NOT NULL DEFAULT '{}'")
+                )
+
+        if "videos" in table_names:
+            video_columns = {column["name"] for column in inspector.get_columns("videos")}
+            if "detection_rate" not in video_columns:
+                connection.execute(
+                    text("ALTER TABLE videos ADD COLUMN detection_rate FLOAT NOT NULL DEFAULT 0")
+                )
+            if "quality_score" not in video_columns:
+                connection.execute(
+                    text("ALTER TABLE videos ADD COLUMN quality_score FLOAT NOT NULL DEFAULT 0")
+                )
+            if "is_trainable" not in video_columns:
+                connection.execute(
+                    text("ALTER TABLE videos ADD COLUMN is_trainable BOOLEAN NOT NULL DEFAULT TRUE")
+                )
+            if "landmark_feature_dim" not in video_columns:
+                connection.execute(
+                    text("ALTER TABLE videos ADD COLUMN landmark_feature_dim INTEGER NOT NULL DEFAULT 225")
+                )
 
 
 @app.on_event("startup")

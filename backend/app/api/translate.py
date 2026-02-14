@@ -8,6 +8,7 @@ import time
 from pathlib import Path
 
 import structlog
+import torch
 from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -40,11 +41,25 @@ def _is_disconnect_runtime_error(error: RuntimeError) -> bool:
 def _resolve_pipeline_labels(db: Session, active_model: ModelVersion | None) -> list[str]:
     """Resolve labels for inference using model metadata first, DB slugs as fallback."""
     if active_model and active_model.class_labels:
-        labels = [label for label in active_model.class_labels if label and label != "NONE"]
+        labels = [label for label in active_model.class_labels if label]
         if labels:
             return labels
 
     return [item.slug for item in db.scalars(select(Sign).order_by(Sign.name.asc())).all()]
+
+
+def _load_checkpoint_runtime_metadata(model_path: str) -> dict[str, object]:
+    """Read lightweight runtime metadata from checkpoint."""
+    try:
+        checkpoint = torch.load(Path(model_path), map_location="cpu", weights_only=True)
+    except Exception:  # noqa: BLE001
+        return {}
+    config = checkpoint.get("config") or {}
+    metadata = checkpoint.get("metadata") or {}
+    return {
+        "sequence_length": config.get("sequence_length"),
+        "calibration_temperature": metadata.get("calibration_temperature"),
+    }
 
 
 def _extract_sentence_tokens(sentence_buffer: str) -> list[str]:
@@ -99,6 +114,25 @@ def get_or_create_pipeline() -> SignFlowInferencePipeline:
         labels = _resolve_pipeline_labels(db, active_model)
 
         if active_model and Path(active_model.file_path).exists():
+            try:
+                model_metadata = active_model.artifact_metadata or {}
+            except Exception:  # noqa: BLE001
+                model_metadata = {}
+            calibration = model_metadata.get("calibration", {}) if isinstance(model_metadata, dict) else {}
+            class_thresholds = (
+                model_metadata.get("class_thresholds", {})
+                if isinstance(model_metadata, dict)
+                else {}
+            )
+            checkpoint_runtime = _load_checkpoint_runtime_metadata(active_model.file_path)
+            sequence_length = int(
+                checkpoint_runtime.get("sequence_length")
+                or settings.translate_seq_len
+            )
+            calibration_temperature = calibration.get("temperature")
+            if calibration_temperature is None:
+                calibration_temperature = checkpoint_runtime.get("calibration_temperature")
+
             logger.info(
                 "loading_active_model",
                 version=active_model.version,
@@ -106,11 +140,19 @@ def get_or_create_pipeline() -> SignFlowInferencePipeline:
             )
             pipeline = SignFlowInferencePipeline(
                 model_path=active_model.file_path,
-                seq_len=settings.translate_seq_len,
+                seq_len=max(8, min(256, sequence_length)),
                 confidence_threshold=settings.translate_confidence_threshold,
                 inference_num_views=settings.translate_inference_num_views,
                 inference_temperature=settings.translate_inference_temperature,
                 max_view_disagreement=settings.translate_max_view_disagreement,
+                calibration_temperature=(
+                    float(calibration_temperature)
+                    if calibration_temperature is not None
+                    else None
+                ),
+                class_thresholds=(
+                    class_thresholds if isinstance(class_thresholds, dict) else {}
+                ),
                 device="cpu",
             )
             pipeline.set_labels(labels)

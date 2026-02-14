@@ -10,7 +10,16 @@ export function useTraining() {
     const session = await startTraining({
       sign_id: signId,
       mode: "few-shot",
-      config: { epochs: 50, learning_rate: 1e-4, augmentation: true, min_deploy_accuracy: minDeployAccuracy }
+      config: {
+        epochs: 50,
+        learning_rate: 1e-4,
+        augmentation: true,
+        quality_min_detection_rate: 0.8,
+        open_set_enabled: true,
+        calibration_enabled: true,
+        eval_repeats: 1,
+        min_deploy_accuracy: minDeployAccuracy
+      }
     });
     setSession(session.id);
     return session;

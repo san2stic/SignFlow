@@ -169,3 +169,18 @@ def test_pipeline_confidence_penalizes_high_view_disagreement() -> None:
     )
 
     assert low_disagreement > high_disagreement
+
+
+def test_pipeline_class_threshold_lookup_supports_none_alias() -> None:
+    """Class threshold lookup should normalize NONE/[NONE] labels."""
+    pipeline = SignFlowInferencePipeline(class_thresholds={"[NONE]": 0.91, "bonjour": 0.83})
+    assert pipeline._threshold_for_label("bonjour") == 0.83
+    assert pipeline._threshold_for_label("NONE") == 0.91
+
+
+def test_pipeline_set_labels_keeps_none_class() -> None:
+    """NONE class should stay available for open-set decoding."""
+    pipeline = SignFlowInferencePipeline()
+    pipeline.model = None
+    pipeline.set_labels(["[NONE]", "lsfb_bonjour"])
+    assert pipeline.labels[0] == "[NONE]"

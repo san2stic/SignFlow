@@ -15,6 +15,9 @@ class TrainingConfig(BaseModel):
     epochs: int = Field(default=50, ge=1, le=500)
     learning_rate: float = Field(default=1e-4, gt=0, le=1)
     augmentation: bool = True
+    num_augmentations_per_sample: int = Field(default=24, ge=0, le=128)
+    augmentation_probability: float = Field(default=0.85, ge=0.0, le=1.0)
+    max_augmented_train_samples: int = Field(default=12000, ge=128, le=200000)
     sequence_length: int = Field(default=64, ge=8, le=256)
     early_stopping_patience: int = Field(default=15, ge=1, le=100)
     early_stopping_min_delta: float = Field(default=1e-4, ge=0, le=1)
@@ -34,8 +37,20 @@ class TrainingConfig(BaseModel):
     use_swa: bool = True
     swa_start_ratio: float = Field(default=0.75, ge=0.1, le=0.95)
     swa_lr: float | None = Field(default=None, gt=0, le=1)
+    use_distillation: bool = False
+    distillation_alpha: float = Field(default=0.25, ge=0.0, le=1.0)
+    distillation_temperature: float = Field(default=2.0, ge=0.1, le=20.0)
+    teacher_model_path: str | None = None
     freeze_until_layer: int = Field(default=2, ge=0, le=8)
     min_deploy_accuracy: float = Field(default=0.85, ge=0.0, le=1.0)
+    quality_min_detection_rate: float = Field(default=0.8, ge=0.0, le=1.0)
+    open_set_enabled: bool = True
+    calibration_enabled: bool = True
+    eval_repeats: int = Field(default=1, ge=1, le=10)
+    macro_f1_gate: float = Field(default=0.82, ge=0.0, le=1.0)
+    target_sign_f1_gate: float = Field(default=0.85, ge=0.0, le=1.0)
+    open_set_fpr_gate: float = Field(default=0.05, ge=0.0, le=1.0)
+    latency_p95_ms_gate: float = Field(default=120.0, ge=1.0, le=10000.0)
 
 
 class TrainingMetrics(BaseModel):
@@ -44,6 +59,12 @@ class TrainingMetrics(BaseModel):
     loss: float = 0.0
     accuracy: float = 0.0
     val_accuracy: float = 0.0
+    macro_f1: float = 0.0
+    target_sign_f1: float | None = None
+    open_set_fpr: float | None = None
+    latency_p95_ms: float | None = None
+    calibration_temperature: float | None = None
+    deployment_gate_passed: bool = False
 
 
 class TrainingSessionCreate(BaseModel):

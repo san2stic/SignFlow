@@ -57,6 +57,19 @@ def expand_classifier_head(model: SignTransformer, target_num_classes: int) -> b
                 new_classifier.bias[old_out:].fill_(float(bias_template))
 
     model.classifier = new_classifier
+
+    if hasattr(model, "class_prototypes"):
+        old_prototypes = model.class_prototypes.detach()
+        new_prototypes = nn.Parameter(torch.randn(target_num_classes, old_prototypes.shape[1]))
+        with torch.no_grad():
+            old_out = old_prototypes.shape[0]
+            new_prototypes[:old_out].copy_(old_prototypes)
+            if target_num_classes > old_out:
+                template = old_prototypes.mean(dim=0, keepdim=True)
+                noise = torch.randn_like(new_prototypes[old_out:]) * 0.01
+                new_prototypes[old_out:].copy_(template + noise)
+        model.class_prototypes = new_prototypes
+
     model.num_classes = target_num_classes
     return True
 
@@ -87,7 +100,7 @@ def prepare_few_shot_model(
     checkpoint_path: str | Path | None,
     num_features: int,
     num_classes: int,
-    d_model: int = 128,
+    d_model: int = 192,
     device: str = "cpu",
     freeze_until_layer: int = 1,
     freeze_embedding: bool = True,
@@ -109,9 +122,17 @@ def prepare_few_shot_model(
             d_model=checkpoint.get("d_model", d_model),
             nhead=checkpoint.get("nhead", 8),
             num_layers=checkpoint.get("num_layers", 4),
+            dim_feedforward=checkpoint.get("dim_feedforward", 768),
+            dropout=checkpoint.get("dropout", 0.2),
+            feature_dropout=checkpoint.get("feature_dropout", 0.15),
+            pooling_dropout=checkpoint.get("pooling_dropout", 0.2),
             use_cls_token=checkpoint.get("use_cls_token", True),
             token_dropout=checkpoint.get("token_dropout", 0.0),
             temporal_smoothing=checkpoint.get("temporal_smoothing", 0.0),
+            use_multiscale_stem=checkpoint.get("use_multiscale_stem", True),
+            use_cosine_head=checkpoint.get("use_cosine_head", True),
+            relative_bias_max_distance=checkpoint.get("relative_bias_max_distance", 64),
+            cosine_head_weight=checkpoint.get("cosine_head_weight", 0.35),
         )
         try:
             model.load_state_dict(checkpoint["model_state_dict"], strict=True)
@@ -127,6 +148,14 @@ def prepare_few_shot_model(
             num_features=num_features,
             num_classes=num_classes,
             d_model=d_model,
+            nhead=6,
+            num_layers=4,
+            dim_feedforward=768,
+            dropout=0.2,
+            feature_dropout=0.15,
+            pooling_dropout=0.2,
+            use_multiscale_stem=True,
+            use_cosine_head=True,
         )
 
     # Enable gradients for training (checkpoint may come from inference mode).

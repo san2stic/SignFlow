@@ -31,6 +31,34 @@ class MediaService:
         """Build safe API path for video playback."""
         return f"/api/v1/media/{video_id}/stream"
 
+    @staticmethod
+    def _estimate_quality_score(landmarks: np.ndarray, detection_rate: float) -> tuple[float, bool]:
+        """
+        Estimate clip quality from landmarks and extraction stats.
+
+        Returns:
+            (quality_score, is_trainable_candidate)
+        """
+        if landmarks.ndim != 2 or landmarks.shape[0] == 0:
+            return 0.0, False
+
+        hands = landmarks[:, :126] if landmarks.shape[1] >= 126 else landmarks
+        visible_ratio = float(np.mean(np.sum(np.abs(hands), axis=1) > 1e-4))
+        if landmarks.shape[0] > 1:
+            motion_energy = float(np.mean(np.abs(np.diff(hands, axis=0))))
+        else:
+            motion_energy = 0.0
+        motion_component = float(np.clip(motion_energy / 0.02, 0.0, 1.0))
+
+        quality = (
+            0.60 * float(np.clip(detection_rate, 0.0, 1.0))
+            + 0.25 * visible_ratio
+            + 0.15 * motion_component
+        )
+        quality = float(np.clip(quality, 0.0, 1.0))
+        is_candidate = detection_rate >= 0.8 and quality >= 0.55
+        return quality, is_candidate
+
     def _to_schema(self, video: Video) -> VideoSchema:
         """Convert ORM object into public-safe schema."""
         return VideoSchema(
@@ -44,6 +72,10 @@ class MediaService:
             type=video.type,
             landmarks_extracted=video.landmarks_extracted,
             landmarks_path=None,
+            detection_rate=float(video.detection_rate or 0.0),
+            quality_score=float(video.quality_score or 0.0),
+            is_trainable=bool(video.is_trainable),
+            landmark_feature_dim=int(video.landmark_feature_dim or 225),
             created_at=video.created_at,
         )
 
@@ -124,6 +156,10 @@ class MediaService:
             type=video_type,
             landmarks_extracted=False,
             landmarks_path=None,
+            detection_rate=0.0,
+            quality_score=0.0,
+            is_trainable=False,
+            landmark_feature_dim=225,
         )
         db.add(video)
 
@@ -140,8 +176,8 @@ class MediaService:
             result = extract_landmarks_from_video(
                 video_path=final_path,
                 include_face=False,  # Exclude face for performance
-                min_detection_confidence=0.5,
-                min_tracking_confidence=0.5,
+                min_detection_confidence=0.7,
+                min_tracking_confidence=0.7,
             )
 
             # Save landmarks to .npy file
@@ -152,6 +188,14 @@ class MediaService:
             # Update video record with landmarks metadata
             video.landmarks_extracted = True
             video.landmarks_path = landmarks_path
+            video.detection_rate = float(result.detection_rate)
+            video.landmark_feature_dim = int(result.landmarks.shape[1])
+            quality_score, candidate_trainable = self._estimate_quality_score(
+                result.landmarks,
+                detection_rate=result.detection_rate,
+            )
+            video.quality_score = quality_score
+            video.is_trainable = bool(candidate_trainable)
             db.commit()
 
             logger.info(

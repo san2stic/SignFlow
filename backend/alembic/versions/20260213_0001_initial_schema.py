@@ -60,7 +60,7 @@ def upgrade() -> None:
         "model_versions",
         sa.Column("id", sa.String(length=36), primary_key=True),
         sa.Column("version", sa.String(length=24), nullable=False),
-        sa.Column("is_active", sa.Boolean(), nullable=False, server_default=sa.text("0")),
+        sa.Column("is_active", sa.Boolean(), nullable=False, server_default=sa.text("false")),
         sa.Column("num_classes", sa.Integer(), nullable=False, server_default="1"),
         sa.Column("accuracy", sa.Float(), nullable=False, server_default="0"),
         sa.Column(
@@ -87,7 +87,7 @@ def upgrade() -> None:
         sa.Column("fps", sa.Integer(), nullable=False, server_default="30"),
         sa.Column("resolution", sa.String(length=32), nullable=False, server_default="640x480"),
         sa.Column("type", sa.String(length=32), nullable=False, server_default="reference"),
-        sa.Column("landmarks_extracted", sa.Boolean(), nullable=False, server_default=sa.text("0")),
+        sa.Column("landmarks_extracted", sa.Boolean(), nullable=False, server_default=sa.text("false")),
         sa.Column("landmarks_path", sa.String(length=512), nullable=True),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
     )

@@ -19,6 +19,7 @@ class ModelVersion(BaseModel):
     num_classes: int
     accuracy: float
     class_labels: list[str] = Field(default_factory=list)
+    metadata: dict = Field(default_factory=dict)
     training_session_id: UUID
     file_path: str
     file_size_mb: float

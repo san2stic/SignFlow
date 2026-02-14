@@ -33,6 +33,7 @@ class TrainingConfig:
     batch_size: int = 32
     num_workers: int = 2
     device: str = "cpu"  # "cpu" or "cuda" or "mps"
+    sequence_length: int = 64
     early_stopping_patience: int = 15       # was 10
     early_stopping_min_delta: float = 1e-4
     gradient_clip_max_norm: float = 1.0
@@ -63,6 +64,10 @@ class TrainingConfig:
     use_swa: bool = True
     swa_start_ratio: float = 0.75
     swa_lr: float | None = None
+
+    use_distillation: bool = False
+    distillation_alpha: float = 0.25
+    distillation_temperature: float = 2.0
 
 
 @dataclass
@@ -137,6 +142,7 @@ class SignTrainer:
         config: TrainingConfig,
         progress_callback: Callable[[TrainingMetrics], None] | None = None,
         stop_signal: Callable[[], bool] | None = None,
+        teacher_model: SignTransformer | None = None,
     ):
         """
         Initialize trainer.
@@ -151,10 +157,16 @@ class SignTrainer:
         self.config = config
         self.progress_callback = progress_callback
         self.stop_signal = stop_signal
+        self.teacher_model = teacher_model
 
         # Move model to device
         self.device = torch.device(config.device)
         self.model.to(self.device)
+        if self.teacher_model is not None:
+            self.teacher_model.to(self.device)
+            self.teacher_model.eval()
+            for parameter in self.teacher_model.parameters():
+                parameter.requires_grad = False
         self.accumulation_steps = max(1, int(self.config.gradient_accumulation_steps))
         self.autocast_enabled = bool(self.config.use_amp and self.device.type == "cuda")
         self.autocast_dtype = (
@@ -343,6 +355,18 @@ class SignTrainer:
         """Compute criterion under mixup target interpolation."""
         return (lam * self.criterion(logits, labels_a)) + ((1.0 - lam) * self.criterion(logits, labels_b))
 
+    def _compute_distillation_loss(
+        self,
+        student_logits: torch.Tensor,
+        teacher_logits: torch.Tensor,
+    ) -> torch.Tensor:
+        """Compute KL distillation loss from teacher to student."""
+        temperature = max(1e-3, float(self.config.distillation_temperature))
+        student_log_probs = torch.nn.functional.log_softmax(student_logits / temperature, dim=1)
+        teacher_probs = torch.nn.functional.softmax(teacher_logits / temperature, dim=1)
+        kl = torch.nn.functional.kl_div(student_log_probs, teacher_probs, reduction="batchmean")
+        return kl * (temperature ** 2)
+
     def _update_ema(self) -> None:
         """Update exponential moving average of trainable parameters."""
         if self.ema_state is None:
@@ -517,9 +541,11 @@ class SignTrainer:
 
             # Forward pass
             with self._autocast_context():
+                distillation_inputs = landmarks
                 if self.config.use_mixup and labels.size(0) >= 2:
                     mixed_landmarks, labels_a, labels_b, lam = self._mixup_batch(landmarks, labels)
                     logits = self.model(mixed_landmarks)
+                    distillation_inputs = mixed_landmarks
                     loss = self._compute_mixup_loss(logits, labels_a, labels_b, lam)
                     predictions = torch.argmax(logits, dim=1)
                     # Soft accuracy estimate under mixed labels.
@@ -532,6 +558,13 @@ class SignTrainer:
                     loss = self.criterion(logits, labels)
                     predictions = torch.argmax(logits, dim=1)
                     correct += float((predictions == labels).sum().item())
+
+                if self.config.use_distillation and self.teacher_model is not None:
+                    with torch.no_grad():
+                        teacher_logits = self.teacher_model(distillation_inputs)
+                    alpha = float(np.clip(self.config.distillation_alpha, 0.0, 1.0))
+                    distillation_loss = self._compute_distillation_loss(logits, teacher_logits)
+                    loss = ((1.0 - alpha) * loss) + (alpha * distillation_loss)
 
             loss_value = float(loss.item())
             scaled_loss = loss / self.accumulation_steps
@@ -729,13 +762,19 @@ class SignTrainer:
 
         return self.metrics_history
 
-    def save_model(self, save_path: str | Path, class_labels: list[str] | None = None) -> None:
+    def save_model(
+        self,
+        save_path: str | Path,
+        class_labels: list[str] | None = None,
+        metadata: dict[str, object] | None = None,
+    ) -> None:
         """
         Save trained model to file.
 
         Args:
             save_path: Path to save model checkpoint
             class_labels: Ordered class labels matching output logits
+            metadata: Optional runtime metadata for inference calibration/gating
         """
         save_path = Path(save_path)
         save_path.parent.mkdir(parents=True, exist_ok=True)
@@ -747,19 +786,30 @@ class SignTrainer:
             "d_model": self.model.d_model,
             "nhead": self.model.nhead,
             "num_layers": self.model.num_layers,
+            "dim_feedforward": getattr(self.model, "dim_feedforward", 768),
+            "dropout": getattr(self.model, "dropout", 0.2),
+            "feature_dropout": getattr(self.model, "feature_dropout", 0.15),
+            "pooling_dropout": getattr(self.model, "pooling_dropout_value", 0.2),
             "use_cls_token": getattr(self.model, "use_cls_token", True),
             "token_dropout": getattr(self.model, "token_dropout", 0.0),
             "temporal_smoothing": getattr(self.model, "temporal_smoothing", 0.0),
+            "use_multiscale_stem": getattr(self.model, "use_multiscale_stem", False),
+            "use_cosine_head": getattr(self.model, "use_cosine_head", False),
+            "relative_bias_max_distance": getattr(self.model, "relative_bias_max_distance", 64),
+            "cosine_head_weight": getattr(self.model, "cosine_head_weight", 0.35),
             "class_labels": class_labels or [],
             "config": {
                 "num_epochs": self.config.num_epochs,
                 "learning_rate": self.config.learning_rate,
                 "batch_size": self.config.batch_size,
+                "sequence_length": self.config.sequence_length,
                 "weight_decay": self.config.weight_decay,
                 "label_smoothing": self.config.label_smoothing,
                 "warmup_epochs": self.config.warmup_epochs,
                 "use_mixup": self.config.use_mixup,
                 "mixup_alpha": self.config.mixup_alpha,
+                "use_class_weights": self.config.use_class_weights,
+                "use_weighted_sampler": self.config.use_weighted_sampler,
                 "use_ema": self.config.use_ema,
                 "ema_decay": self.config.ema_decay,
                 "gradient_accumulation_steps": self.config.gradient_accumulation_steps,
@@ -770,6 +820,9 @@ class SignTrainer:
                 "use_swa": self.config.use_swa,
                 "swa_start_ratio": self.config.swa_start_ratio,
                 "swa_lr": self.config.swa_lr,
+                "use_distillation": self.config.use_distillation,
+                "distillation_alpha": self.config.distillation_alpha,
+                "distillation_temperature": self.config.distillation_temperature,
             },
             "metrics_history": [
                 {
@@ -782,6 +835,7 @@ class SignTrainer:
                 for m in self.metrics_history
             ],
             "best_val_loss": self.best_val_loss,
+            "metadata": metadata or {},
         }
 
         torch.save(checkpoint, save_path)
@@ -815,12 +869,20 @@ def load_model_checkpoint(checkpoint_path: str | Path, device: str = "cpu") -> S
         model = SignTransformer(
             num_features=checkpoint.get("num_features", 225),
             num_classes=checkpoint["num_classes"],
-            d_model=checkpoint.get("d_model", 256),
-            nhead=checkpoint.get("nhead", 8),
+            d_model=checkpoint.get("d_model", 192),
+            nhead=checkpoint.get("nhead", 6),
             num_layers=checkpoint.get("num_layers", 4),
+            dim_feedforward=checkpoint.get("dim_feedforward", 768),
+            dropout=checkpoint.get("dropout", 0.2),
+            feature_dropout=checkpoint.get("feature_dropout", 0.15),
+            pooling_dropout=checkpoint.get("pooling_dropout", 0.2),
             use_cls_token=checkpoint.get("use_cls_token", True),
             token_dropout=checkpoint.get("token_dropout", 0.0),
             temporal_smoothing=checkpoint.get("temporal_smoothing", 0.0),
+            use_multiscale_stem=checkpoint.get("use_multiscale_stem", False),
+            use_cosine_head=checkpoint.get("use_cosine_head", False),
+            relative_bias_max_distance=checkpoint.get("relative_bias_max_distance", 64),
+            cosine_head_weight=checkpoint.get("cosine_head_weight", 0.35),
         )
 
         # Load weights (strict first, fallback for backward compatibility).

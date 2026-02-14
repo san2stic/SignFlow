@@ -3,16 +3,18 @@
 from __future__ import annotations
 
 import threading
-from multiprocessing import current_process
 from collections import defaultdict
+from multiprocessing import current_process
 from datetime import datetime, timezone
 from pathlib import Path
+import time
 
 import numpy as np
 import structlog
 import torch
 from sqlalchemy import select
 from sqlalchemy.orm import Session
+from torch.utils.data import DataLoader
 
 from app.config import get_settings
 from app.database import SessionLocal
@@ -21,7 +23,12 @@ from app.ml.dataset import LandmarkDataset, SignSample, load_landmarks_from_file
 from app.ml.fewshot import prepare_few_shot_model
 from app.ml.model import SignTransformer
 from app.ml.prototypical import run_prototypical_fallback
-from app.ml.trainer import SignTrainer, TrainingConfig as MLTrainingConfig, TrainingMetrics
+from app.ml.trainer import (
+    SignTrainer,
+    TrainingConfig as MLTrainingConfig,
+    TrainingMetrics,
+    load_model_checkpoint,
+)
 from app.models.model_version import ModelVersion
 from app.models.sign import Sign
 from app.models.training import TrainingSession
@@ -134,6 +141,7 @@ class TrainingService:
         apply_augmentation: bool = True,
         num_augmentations_per_sample: int = 5,
         augmentation_probability: float = 0.5,
+        max_augmented_train_samples: int | None = None,
     ) -> tuple[list[np.ndarray], list[int], list[np.ndarray], list[int]]:
         """
         Split dataset first, then augment train split only.
@@ -166,8 +174,415 @@ class TrainingService:
                 num_augmentations_per_sample=num_augmentations_per_sample,
                 augmentation_probability=augmentation_probability,
             )
+            if max_augmented_train_samples is not None and len(train_sequences) > max_augmented_train_samples:
+                # Keep all originals and subsample augmented tails if needed.
+                original_count = len(train_indices)
+                max_total = max(original_count, int(max_augmented_train_samples))
+                keep_augmented = max_total - original_count
+
+                if keep_augmented <= 0:
+                    train_sequences = train_sequences[:original_count]
+                    train_labels = train_labels[:original_count]
+                else:
+                    augmented_start = original_count
+                    augmented_indices = list(range(augmented_start, len(train_sequences)))
+                    rng = np.random.default_rng()
+                    rng.shuffle(augmented_indices)
+                    kept_augmented_indices = augmented_indices[:keep_augmented]
+                    selected = list(range(original_count)) + kept_augmented_indices
+                    train_sequences = [train_sequences[index] for index in selected]
+                    train_labels = [train_labels[index] for index in selected]
 
         return train_sequences, train_labels, val_sequences, val_labels
+
+    @staticmethod
+    def _resolve_augmentation_policy(
+        *,
+        mode: str,
+        config: dict | None,
+        train_size: int,
+        target_class_samples: int | None = None,
+    ) -> tuple[int, float, int]:
+        """
+        Resolve augmentation intensity using mode-aware defaults and sample budgets.
+
+        Returns:
+            (num_augmentations_per_sample, augmentation_probability, max_train_samples)
+        """
+        cfg = config or {}
+        normalized_mode = str(mode)
+
+        if normalized_mode == "few-shot":
+            target = int(target_class_samples or 0)
+            if target < 10:
+                default_num_aug = 16
+                default_probability = 0.70
+            elif target <= 30:
+                default_num_aug = 10
+                default_probability = 0.60
+            else:
+                default_num_aug = 6
+                default_probability = 0.50
+            default_max_train_samples = 12000
+        else:
+            default_num_aug = 4
+            default_probability = 0.45
+            default_max_train_samples = 40000
+
+        if cfg.get("num_augmentations_per_sample") is None:
+            requested_num_aug = default_num_aug
+        else:
+            requested_num_aug = int(cfg["num_augmentations_per_sample"])
+        requested_num_aug = max(0, min(128, requested_num_aug))
+
+        if cfg.get("augmentation_probability") is None:
+            requested_probability = default_probability
+        else:
+            requested_probability = float(cfg["augmentation_probability"])
+        requested_probability = float(np.clip(requested_probability, 0.0, 1.0))
+
+        requested_max_samples = int(cfg.get("max_augmented_train_samples", default_max_train_samples))
+        requested_max_samples = max(int(train_size), requested_max_samples)
+
+        if train_size <= 0 or requested_num_aug <= 0:
+            return 0, requested_probability, requested_max_samples
+
+        # Base set size + per-sample augmentations, bounded by max sample budget.
+        max_extra = max(0, requested_max_samples - train_size)
+        max_aug_per_sample = max_extra // train_size
+        effective_num_aug = min(requested_num_aug, max_aug_per_sample)
+        effective_num_aug = max(0, effective_num_aug)
+
+        return effective_num_aug, requested_probability, requested_max_samples
+
+    @staticmethod
+    def _compute_motion_signal(sequence: np.ndarray) -> np.ndarray:
+        """Compute frame-level hand motion magnitude for one sequence."""
+        if sequence.ndim != 2 or sequence.shape[0] == 0:
+            return np.array([], dtype=np.float32)
+        hands = sequence[:, :126] if sequence.shape[1] >= 126 else sequence
+        if hands.shape[0] < 2:
+            return np.zeros((hands.shape[0],), dtype=np.float32)
+        deltas = np.mean(np.abs(np.diff(hands, axis=0)), axis=1)
+        first = np.array([float(deltas[0])], dtype=np.float32)
+        return np.concatenate([first, deltas.astype(np.float32)], axis=0)
+
+    @staticmethod
+    def _extract_rest_segments(
+        sequence: np.ndarray,
+        *,
+        motion_threshold: float = 0.0015,
+        min_len: int = 12,
+        max_segments: int = 3,
+    ) -> list[np.ndarray]:
+        """Extract low-motion contiguous segments to represent [NONE] windows."""
+        motion = TrainingService._compute_motion_signal(sequence)
+        if motion.size == 0:
+            return []
+
+        low_motion = motion < float(motion_threshold)
+        segments: list[np.ndarray] = []
+        start: int | None = None
+        for index, value in enumerate(low_motion.tolist() + [False]):
+            if value and start is None:
+                start = index
+                continue
+            if not value and start is not None:
+                end = index
+                if end - start >= min_len:
+                    candidate = sequence[start:end]
+                    if candidate.size:
+                        segments.append(candidate)
+                start = None
+                if len(segments) >= max_segments:
+                    break
+        return segments
+
+    @staticmethod
+    def _generate_open_set_sequences(
+        *,
+        labeled_sequences: list[np.ndarray],
+        unlabeled_sequences: list[np.ndarray],
+        max_count: int,
+    ) -> list[np.ndarray]:
+        """Build [NONE] sequences from rest windows and low-motion unlabeled clips."""
+        if max_count <= 0:
+            return []
+
+        generated: list[np.ndarray] = []
+        for sequence in labeled_sequences:
+            generated.extend(TrainingService._extract_rest_segments(sequence))
+            if len(generated) >= max_count:
+                return generated[:max_count]
+
+        for sequence in unlabeled_sequences:
+            motion = TrainingService._compute_motion_signal(sequence)
+            if motion.size == 0:
+                continue
+            if float(np.mean(motion)) < 0.002:
+                generated.append(sequence)
+            if len(generated) >= max_count:
+                break
+        return generated[:max_count]
+
+    @staticmethod
+    def _collect_logits_and_labels(
+        *,
+        model: SignTransformer,
+        dataset: LandmarkDataset,
+        device: str,
+        batch_size: int = 64,
+        repeats: int = 1,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Collect logits/labels from one dataset for calibration and evaluation."""
+        loader = DataLoader(
+            dataset,
+            batch_size=max(1, int(batch_size)),
+            shuffle=False,
+            num_workers=0,
+        )
+        torch_device = torch.device(device)
+        model = model.to(torch_device)
+        model.eval()
+
+        logits_chunks: list[np.ndarray] = []
+        label_chunks: list[np.ndarray] = []
+        repeat_count = max(1, int(repeats))
+        with torch.no_grad():
+            for _ in range(repeat_count):
+                for landmarks, labels in loader:
+                    logits = model(landmarks.to(torch_device))
+                    logits_chunks.append(logits.detach().cpu().numpy())
+                    label_chunks.append(labels.detach().cpu().numpy())
+
+        if not logits_chunks:
+            return (
+                np.zeros((0, model.num_classes), dtype=np.float32),
+                np.zeros((0,), dtype=np.int64),
+            )
+        return (
+            np.concatenate(logits_chunks, axis=0).astype(np.float32),
+            np.concatenate(label_chunks, axis=0).astype(np.int64),
+        )
+
+    @staticmethod
+    def _fit_temperature(logits: np.ndarray, labels: np.ndarray) -> float:
+        """Fit temperature scaling on validation logits by minimizing NLL."""
+        if logits.size == 0 or labels.size == 0:
+            return 1.0
+
+        logits_tensor = torch.tensor(logits, dtype=torch.float32)
+        labels_tensor = torch.tensor(labels, dtype=torch.long)
+        log_temperature = torch.tensor(0.0, dtype=torch.float32, requires_grad=True)
+        optimizer = torch.optim.LBFGS([log_temperature], lr=0.1, max_iter=50)
+        criterion = torch.nn.CrossEntropyLoss()
+
+        def closure() -> torch.Tensor:
+            optimizer.zero_grad()
+            temperature = torch.exp(log_temperature).clamp(0.5, 10.0)
+            loss = criterion(logits_tensor / temperature, labels_tensor)
+            loss.backward()
+            return loss
+
+        try:
+            optimizer.step(closure)
+            value = float(torch.exp(log_temperature).detach().cpu().item())
+            return float(np.clip(value, 0.5, 10.0))
+        except Exception:  # noqa: BLE001
+            return 1.0
+
+    @staticmethod
+    def _apply_temperature(logits: np.ndarray, temperature: float) -> np.ndarray:
+        """Apply temperature-scaled softmax to logits."""
+        temp = float(max(1e-3, temperature))
+        scaled = logits / temp
+        scaled = scaled - np.max(scaled, axis=1, keepdims=True)
+        exp = np.exp(scaled)
+        denom = np.sum(exp, axis=1, keepdims=True)
+        denom = np.clip(denom, 1e-9, None)
+        return exp / denom
+
+    @staticmethod
+    def _binary_f1(y_true: np.ndarray, y_pred: np.ndarray) -> float:
+        """Compute binary F1 with safe zero handling."""
+        tp = int(np.sum((y_true == 1) & (y_pred == 1)))
+        fp = int(np.sum((y_true == 0) & (y_pred == 1)))
+        fn = int(np.sum((y_true == 1) & (y_pred == 0)))
+        if tp == 0:
+            return 0.0
+        precision = tp / max(1, tp + fp)
+        recall = tp / max(1, tp + fn)
+        if precision + recall <= 0:
+            return 0.0
+        return float((2.0 * precision * recall) / (precision + recall))
+
+    @staticmethod
+    def _learn_class_thresholds(
+        probs: np.ndarray,
+        labels: np.ndarray,
+        class_labels: list[str],
+    ) -> dict[str, float]:
+        """Learn per-class confidence thresholds from validation predictions."""
+        if probs.size == 0 or labels.size == 0:
+            return {}
+
+        thresholds: dict[str, float] = {}
+        candidates = np.linspace(0.35, 0.95, 13)
+        for class_index, class_label in enumerate(class_labels):
+            y_true = (labels == class_index).astype(np.int32)
+            if int(np.sum(y_true)) == 0:
+                thresholds[class_label] = 0.75
+                continue
+
+            best_threshold = 0.7
+            best_f1 = -1.0
+            for candidate in candidates:
+                y_pred = (probs[:, class_index] >= candidate).astype(np.int32)
+                score = TrainingService._binary_f1(y_true, y_pred)
+                if score > best_f1:
+                    best_f1 = score
+                    best_threshold = float(candidate)
+            thresholds[class_label] = float(best_threshold)
+        return thresholds
+
+    @staticmethod
+    def _predict_with_thresholds(
+        probs: np.ndarray,
+        *,
+        class_labels: list[str],
+        class_thresholds: dict[str, float],
+        none_label: str = "[NONE]",
+    ) -> np.ndarray:
+        """Decode class indices with per-class confidence thresholds."""
+        if probs.size == 0:
+            return np.zeros((0,), dtype=np.int64)
+        none_index = class_labels.index(none_label) if none_label in class_labels else -1
+        predictions: list[int] = []
+        for row in probs:
+            top_index = int(np.argmax(row))
+            label = class_labels[top_index] if top_index < len(class_labels) else f"class_{top_index}"
+            threshold = max(0.5, float(class_thresholds.get(label, 0.7)))
+            if float(row[top_index]) < threshold and none_index >= 0:
+                predictions.append(none_index)
+                continue
+            if none_index >= 0 and top_index != none_index:
+                none_threshold = max(0.5, float(class_thresholds.get(none_label, 0.7)))
+                if float(row[none_index]) >= none_threshold and float(row[none_index]) > float(row[top_index]):
+                    predictions.append(none_index)
+                    continue
+            predictions.append(top_index)
+        return np.array(predictions, dtype=np.int64)
+
+    @staticmethod
+    def _f1_for_label(y_true: np.ndarray, y_pred: np.ndarray, label_index: int) -> float:
+        """Compute one-vs-rest F1 for a single class index."""
+        truth = (y_true == label_index).astype(np.int32)
+        pred = (y_pred == label_index).astype(np.int32)
+        return TrainingService._binary_f1(truth, pred)
+
+    @staticmethod
+    def _compute_eval_metrics(
+        *,
+        y_true: np.ndarray,
+        y_pred: np.ndarray,
+        class_labels: list[str],
+        target_label: str | None,
+        none_label: str = "[NONE]",
+    ) -> dict[str, float | None]:
+        """Compute macro F1, target sign F1, and open-set false positive rate."""
+        if y_true.size == 0:
+            return {
+                "macro_f1": 0.0,
+                "target_sign_f1": None,
+                "open_set_fpr": None,
+            }
+
+        none_index = class_labels.index(none_label) if none_label in class_labels else -1
+        labels_for_macro = sorted(set(int(v) for v in y_true.tolist()))
+        if none_index >= 0:
+            labels_for_macro = [label for label in labels_for_macro if label != none_index]
+        if not labels_for_macro:
+            labels_for_macro = sorted(set(int(v) for v in y_true.tolist()))
+
+        f1_scores = [TrainingService._f1_for_label(y_true, y_pred, idx) for idx in labels_for_macro]
+        macro_f1 = float(np.mean(f1_scores)) if f1_scores else 0.0
+
+        target_sign_f1: float | None = None
+        if target_label and target_label in class_labels:
+            target_index = class_labels.index(target_label)
+            target_sign_f1 = TrainingService._f1_for_label(y_true, y_pred, target_index)
+
+        open_set_fpr: float | None = None
+        if none_index >= 0:
+            none_mask = y_true == none_index
+            if int(np.sum(none_mask)) > 0:
+                false_positive = int(np.sum((y_pred != none_index) & none_mask))
+                open_set_fpr = float(false_positive / int(np.sum(none_mask)))
+            else:
+                open_set_fpr = 0.0
+
+        return {
+            "macro_f1": macro_f1,
+            "target_sign_f1": target_sign_f1,
+            "open_set_fpr": open_set_fpr,
+        }
+
+    @staticmethod
+    def _estimate_latency_p95_ms(
+        *,
+        model: SignTransformer,
+        dataset: LandmarkDataset,
+        device: str,
+        max_samples: int = 200,
+    ) -> float:
+        """Estimate p95 per-sample inference latency on a dataset."""
+        if len(dataset) == 0:
+            return 0.0
+        loader = DataLoader(dataset, batch_size=1, shuffle=False, num_workers=0)
+        torch_device = torch.device(device)
+        model = model.to(torch_device)
+        model.eval()
+
+        timings: list[float] = []
+        with torch.no_grad():
+            for index, (landmarks, _labels) in enumerate(loader):
+                if index >= max_samples:
+                    break
+                start = time.perf_counter()
+                _ = model(landmarks.to(torch_device))
+                duration_ms = (time.perf_counter() - start) * 1000.0
+                timings.append(float(duration_ms))
+
+        if not timings:
+            return 0.0
+        return float(np.percentile(np.array(timings, dtype=np.float32), 95))
+
+    @staticmethod
+    def _passes_deployment_gate(
+        *,
+        mode: str,
+        config: dict,
+        macro_f1: float,
+        target_sign_f1: float | None,
+        open_set_fpr: float | None,
+        latency_p95_ms: float,
+    ) -> bool:
+        """Evaluate multi-metric deployment gate."""
+        macro_gate = float(config.get("macro_f1_gate", 0.82))
+        target_gate = float(config.get("target_sign_f1_gate", 0.85))
+        open_set_gate = float(config.get("open_set_fpr_gate", 0.05))
+        latency_gate = float(config.get("latency_p95_ms_gate", 120.0))
+
+        if macro_f1 < macro_gate:
+            return False
+        if mode == "few-shot":
+            if target_sign_f1 is None or target_sign_f1 < target_gate:
+                return False
+        if open_set_fpr is not None and open_set_fpr > open_set_gate:
+            return False
+        if latency_p95_ms > latency_gate:
+            return False
+        return True
 
     def _build_session_metrics(
         self,
@@ -179,6 +594,12 @@ class TrainingService:
         current_epoch: int = 0,
         deployment_ready: bool = False,
         final_val_accuracy: float | None = None,
+        macro_f1: float = 0.0,
+        target_sign_f1: float | None = None,
+        open_set_fpr: float | None = None,
+        latency_p95_ms: float | None = None,
+        calibration_temperature: float | None = None,
+        deployment_gate_passed: bool = False,
         recommended_next_action: str = "wait",
     ) -> dict:
         """Build normalized training metrics payload stored in JSON."""
@@ -192,6 +613,16 @@ class TrainingService:
             "final_val_accuracy": round(float(final_val_accuracy), 4)
             if final_val_accuracy is not None
             else None,
+            "macro_f1": round(float(macro_f1), 4),
+            "target_sign_f1": round(float(target_sign_f1), 4) if target_sign_f1 is not None else None,
+            "open_set_fpr": round(float(open_set_fpr), 4) if open_set_fpr is not None else None,
+            "latency_p95_ms": round(float(latency_p95_ms), 2) if latency_p95_ms is not None else None,
+            "calibration_temperature": (
+                round(float(calibration_temperature), 4)
+                if calibration_temperature is not None
+                else None
+            ),
+            "deployment_gate_passed": bool(deployment_gate_passed),
             "recommended_next_action": recommended_next_action,
         }
 
@@ -237,7 +668,7 @@ class TrainingService:
 
     def create_session(self, db: Session, payload: TrainingSessionCreate) -> TrainingSession:
         """Insert a queued session row and dispatch background execution."""
-        config = payload.config.model_dump()
+        config = payload.config.model_dump(exclude_unset=True)
         deploy_threshold = self._resolve_deploy_threshold(config)
         session = TrainingSession(
             sign_id=str(payload.sign_id) if payload.sign_id else None,
@@ -339,18 +770,32 @@ class TrainingService:
                         .order_by(ModelVersion.created_at.desc())
                     )
 
-                # Always include full existing corpus (all video types) for stable class mapping.
+                quality_min_detection_rate = float(config.get("quality_min_detection_rate", 0.8))
+                open_set_enabled = bool(config.get("open_set_enabled", True))
+
+                # Labeled + quality-filtered videos only for supervised classes.
                 videos = db.scalars(
                     select(Video)
-                    .where(Video.landmarks_extracted.is_(True))
+                    .where(
+                        Video.sign_id.is_not(None),
+                        Video.landmarks_extracted.is_(True),
+                        Video.landmarks_path.is_not(None),
+                        Video.is_trainable.is_(True),
+                        Video.detection_rate >= quality_min_detection_rate,
+                    )
                     .order_by(Video.created_at.asc())
                 ).all()
                 if not videos:
-                    raise ValueError("No videos with extracted landmarks available")
+                    raise ValueError("No trainable labeled videos with extracted landmarks available")
 
-                logger.info("loading_landmarks", num_videos=len(videos))
+                logger.info(
+                    "loading_landmarks",
+                    num_videos=len(videos),
+                    quality_min_detection_rate=quality_min_detection_rate,
+                    open_set_enabled=open_set_enabled,
+                )
 
-                sign_ids = {video.sign_id for video in videos}
+                sign_ids = {video.sign_id for video in videos if video.sign_id}
                 signs = db.scalars(select(Sign).where(Sign.id.in_(sign_ids))).all() if sign_ids else []
                 slug_by_id = {item.id: item.slug for item in signs}
 
@@ -359,10 +804,12 @@ class TrainingService:
                     if target_count == 0:
                         raise ValueError("few-shot requested sign has no videos with extracted landmarks")
 
-                # Load landmarks from files
+                # Load supervised landmarks
                 sequences: list[np.ndarray] = []
                 labels: list[int] = []
                 label_map: dict[str, int] = {}  # sign slug -> class index
+                none_label = "[NONE]"
+                unlabeled_sequences: list[np.ndarray] = []
 
                 # Preserve active model class order for consistent logits -> labels mapping.
                 if mode == "few-shot" and active_model and active_model.class_labels:
@@ -391,15 +838,78 @@ class TrainingService:
                             error=str(e),
                         )
 
+                if open_set_enabled:
+                    unlabeled_videos = db.scalars(
+                        select(Video)
+                        .where(
+                            Video.sign_id.is_(None),
+                            Video.landmarks_extracted.is_(True),
+                            Video.landmarks_path.is_not(None),
+                        )
+                        .order_by(Video.created_at.asc())
+                    ).all()
+                    for video in unlabeled_videos:
+                        if not video.landmarks_path:
+                            continue
+                        try:
+                            unlabeled_sequences.append(load_landmarks_from_file(video.landmarks_path))
+                        except Exception as exc:  # noqa: BLE001
+                            logger.warning(
+                                "failed_to_load_unlabeled_landmarks",
+                                video_id=str(video.id),
+                                error=str(exc),
+                            )
+
                 if not sequences:
                     raise ValueError("No valid landmark sequences loaded")
 
                 if len(sequences) < 2:
                     raise ValueError("Need at least 2 training samples for train/validation split")
 
+                if open_set_enabled:
+                    desired_none_count = max(8, min(256, len(sequences) // 4))
+                    none_sequences = self._generate_open_set_sequences(
+                        labeled_sequences=sequences,
+                        unlabeled_sequences=unlabeled_sequences,
+                        max_count=desired_none_count,
+                    )
+                    if none_sequences:
+                        if none_label not in label_map:
+                            label_map[none_label] = len(label_map)
+                        none_index = label_map[none_label]
+                        for sample in none_sequences:
+                            sequences.append(sample)
+                            labels.append(none_index)
+                    logger.info(
+                        "open_set_none_generated",
+                        requested=desired_none_count,
+                        generated=len(none_sequences),
+                    )
+                elif none_label in label_map:
+                    # Explicitly remove NONE class when open-set training is disabled.
+                    filtered = {name: idx for name, idx in label_map.items() if name != none_label}
+                    idx_to_name = {idx: name for name, idx in filtered.items()}
+                    reordered_names = [item[0] for item in sorted(filtered.items(), key=lambda item: item[1])]
+                    label_map = {name: index for index, name in enumerate(reordered_names)}
+                    labels = [
+                        label_map[idx_to_name[idx]]
+                        for idx in labels
+                        if idx in idx_to_name
+                    ]
+
                 num_classes = len(label_map)
                 class_labels = [item[0] for item in sorted(label_map.items(), key=lambda item: item[1])]
                 logger.info("data_loaded", num_samples=len(sequences), num_classes=num_classes)
+
+                requested_train_size = int(round(len(sequences) * 0.8))
+                num_aug_per_sample, aug_probability, max_aug_train_samples = (
+                    self._resolve_augmentation_policy(
+                        mode=mode,
+                        config=config,
+                        train_size=max(1, requested_train_size),
+                        target_class_samples=target_count,
+                    )
+                )
 
                 # Split first, augment train only to avoid train/val leakage.
                 train_sequences, train_labels, val_sequences, val_labels = self._split_and_prepare_sequences(
@@ -407,14 +917,18 @@ class TrainingService:
                     labels,
                     val_ratio=0.2,
                     apply_augmentation=bool(config.get("augmentation", True)),
-                    num_augmentations_per_sample=5,
-                    augmentation_probability=0.5,
+                    num_augmentations_per_sample=num_aug_per_sample,
+                    augmentation_probability=aug_probability,
+                    max_augmented_train_samples=max_aug_train_samples,
                 )
                 logger.info(
                     "dataset_split_ready",
                     train_samples=len(train_sequences),
                     val_samples=len(val_sequences),
                     augmentation=bool(config.get("augmentation", True)),
+                    augmentations_per_sample=num_aug_per_sample,
+                    augmentation_probability=aug_probability,
+                    max_augmented_train_samples=max_aug_train_samples,
                 )
 
                 train_samples = [
@@ -470,7 +984,7 @@ class TrainingService:
                         checkpoint_path=active_checkpoint,
                         num_features=num_features,
                         num_classes=num_classes,
-                        d_model=128,
+                        d_model=192,
                         device=device,
                         freeze_until_layer=int(config.get("freeze_until_layer", 2)),
                     )
@@ -483,6 +997,33 @@ class TrainingService:
                     )
 
                 # Training configuration
+                use_class_weights = bool(config.get("use_class_weights", mode != "few-shot"))
+                use_weighted_sampler = bool(config.get("use_weighted_sampler", mode == "few-shot"))
+                use_focal_loss = bool(config.get("use_focal_loss", mode == "few-shot"))
+                if mode == "few-shot":
+                    # Avoid stacking class weights with sampler+focal simultaneously.
+                    use_class_weights = False
+                    use_weighted_sampler = True
+                    use_focal_loss = True
+                else:
+                    use_class_weights = True
+                    use_weighted_sampler = False
+                    use_focal_loss = False
+
+                teacher_model: SignTransformer | None = None
+                use_distillation = bool(config.get("use_distillation", mode == "few-shot"))
+                teacher_model_path = str(config.get("teacher_model_path", "")).strip()
+                if use_distillation:
+                    try:
+                        if teacher_model_path and Path(teacher_model_path).exists():
+                            teacher_model = load_model_checkpoint(teacher_model_path, device=device)
+                        elif mode == "few-shot" and active_model and active_model.file_path and Path(active_model.file_path).exists():
+                            teacher_model = load_model_checkpoint(active_model.file_path, device=device)
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning("teacher_model_load_failed", error=str(exc))
+                        teacher_model = None
+                        use_distillation = False
+
                 ml_config = MLTrainingConfig(
                     num_epochs=int(config.get("epochs", 50)),
                     learning_rate=float(
@@ -491,13 +1032,16 @@ class TrainingService:
                     batch_size=32,
                     num_workers=self._resolve_dataloader_workers(int(config.get("num_workers", 2))),
                     device=device,
+                    sequence_length=sequence_length,
                     early_stopping_patience=int(config.get("early_stopping_patience", 15)),
                     early_stopping_min_delta=float(config.get("early_stopping_min_delta", 1e-4)),
                     weight_decay=float(config.get("weight_decay", 0.05)),
                     classifier_lr_multiplier=float(config.get("classifier_lr_multiplier", 2.0)),
                     label_smoothing=float(config.get("label_smoothing", 0.1)),
                     warmup_epochs=int(config.get("warmup_epochs", 3)),
-                    use_focal_loss=(mode == "few-shot"),  # Focal loss for few-shot
+                    use_focal_loss=use_focal_loss,
+                    use_class_weights=use_class_weights,
+                    use_weighted_sampler=use_weighted_sampler,
                     use_mixup=bool(config.get("use_mixup", True)),
                     mixup_alpha=float(config.get("mixup_alpha", 0.3)),
                     use_ema=bool(config.get("use_ema", True)),
@@ -514,6 +1058,9 @@ class TrainingService:
                         if config.get("swa_lr") not in (None, "")
                         else None
                     ),
+                    use_distillation=use_distillation,
+                    distillation_alpha=float(config.get("distillation_alpha", 0.25)),
+                    distillation_temperature=float(config.get("distillation_temperature", 2.0)),
                 )
 
                 # Progress callback
@@ -543,6 +1090,7 @@ class TrainingService:
                     config=ml_config,
                     progress_callback=progress_callback,
                     stop_signal=stop_signal,
+                    teacher_model=teacher_model,
                 )
 
                 use_prototypical = mode == "few-shot" and target_count < 5
@@ -610,13 +1158,88 @@ class TrainingService:
                             class_labels.append(f"class_{index}")
                     else:
                         class_labels = class_labels[:num_classes]
-                trainer.save_model(model_file, class_labels=class_labels)
+
+                eval_repeats = int(config.get("eval_repeats", 1))
+                logits, eval_labels = self._collect_logits_and_labels(
+                    model=model,
+                    dataset=val_dataset,
+                    device=device,
+                    batch_size=ml_config.batch_size,
+                    repeats=eval_repeats,
+                )
+                calibration_enabled = bool(config.get("calibration_enabled", True))
+                calibration_temperature = (
+                    self._fit_temperature(logits, eval_labels)
+                    if calibration_enabled
+                    else 1.0
+                )
+                probs = self._apply_temperature(logits, calibration_temperature)
+                class_thresholds = self._learn_class_thresholds(probs, eval_labels, class_labels)
+                decoded = self._predict_with_thresholds(
+                    probs,
+                    class_labels=class_labels,
+                    class_thresholds=class_thresholds,
+                )
+
+                target_sign_slug = slug_by_id.get(sign_id) if sign_id else None
+                eval_metrics = self._compute_eval_metrics(
+                    y_true=eval_labels,
+                    y_pred=decoded,
+                    class_labels=class_labels,
+                    target_label=target_sign_slug,
+                )
+                macro_f1 = float(eval_metrics.get("macro_f1") or 0.0)
+                target_sign_f1 = (
+                    float(eval_metrics["target_sign_f1"])
+                    if eval_metrics.get("target_sign_f1") is not None
+                    else None
+                )
+                open_set_fpr = (
+                    float(eval_metrics["open_set_fpr"])
+                    if eval_metrics.get("open_set_fpr") is not None
+                    else None
+                )
+                latency_p95_ms = self._estimate_latency_p95_ms(
+                    model=model,
+                    dataset=val_dataset,
+                    device=device,
+                )
+                deployment_ready = self._passes_deployment_gate(
+                    mode=mode,
+                    config=config,
+                    macro_f1=macro_f1,
+                    target_sign_f1=target_sign_f1,
+                    open_set_fpr=open_set_fpr,
+                    latency_p95_ms=latency_p95_ms,
+                )
+
+                model_eval_report = {
+                    "macro_f1": round(macro_f1, 4),
+                    "target_sign_f1": round(float(target_sign_f1), 4)
+                    if target_sign_f1 is not None
+                    else None,
+                    "open_set_fpr": round(float(open_set_fpr), 4)
+                    if open_set_fpr is not None
+                    else None,
+                    "latency_p95_ms": round(float(latency_p95_ms), 2),
+                    "deployment_gate_passed": bool(deployment_ready),
+                }
+
+                runtime_metadata = {
+                    "class_thresholds": class_thresholds,
+                    "calibration_temperature": calibration_temperature,
+                    "eval_report": model_eval_report,
+                }
+                trainer.save_model(
+                    model_file,
+                    class_labels=class_labels,
+                    metadata=runtime_metadata,
+                )
 
                 logger.info("model_saved", path=str(model_file), version=version)
 
                 # Create model version record
                 final_accuracy = metrics_history[-1].val_accuracy if metrics_history else 0.0
-                deployment_ready = final_accuracy >= deploy_threshold
                 next_action = "deploy" if deployment_ready else "collect_more_examples"
 
                 parent_version = existing[-1].version if existing else None
@@ -626,6 +1249,11 @@ class TrainingService:
                     num_classes=num_classes,
                     accuracy=final_accuracy,
                     class_labels=class_labels,
+                    artifact_metadata={
+                        "class_thresholds": class_thresholds,
+                        "calibration": {"temperature": calibration_temperature},
+                        "eval_report": model_eval_report,
+                    },
                     training_session_id=session.id,
                     file_path=str(model_file),
                     file_size_mb=round(model_file.stat().st_size / 1_048_576, 4),
@@ -645,6 +1273,12 @@ class TrainingService:
                     deploy_threshold=deploy_threshold,
                     deployment_ready=deployment_ready,
                     final_val_accuracy=final_accuracy,
+                    macro_f1=macro_f1,
+                    target_sign_f1=target_sign_f1,
+                    open_set_fpr=open_set_fpr,
+                    latency_p95_ms=latency_p95_ms,
+                    calibration_temperature=calibration_temperature,
+                    deployment_gate_passed=deployment_ready,
                     recommended_next_action=next_action,
                 )
                 session.completed_at = datetime.now(timezone.utc)

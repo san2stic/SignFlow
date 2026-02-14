@@ -40,7 +40,7 @@ class Settings(BaseSettings):
     ws_messages_per_minute: int = Field(default=900, ge=60, le=10000)
     ws_max_connections_per_ip: int = Field(default=3, ge=1, le=100)
     training_use_celery: bool = False
-    translate_seq_len: int = Field(default=30, ge=8, le=256)
+    translate_seq_len: int = Field(default=64, ge=8, le=256)
     translate_confidence_threshold: float = Field(default=0.7, ge=0.0, le=1.0)
     translate_inference_num_views: int = Field(default=1, ge=1, le=8)
     translate_inference_temperature: float = Field(default=1.0, ge=0.1, le=3.0)

@@ -82,3 +82,47 @@ def test_split_without_augmentation_preserves_total_sample_count() -> None:
     assert len(train_sequences) + len(val_sequences) == len(sequences)
     assert len(train_labels) + len(val_labels) == len(labels)
 
+
+def test_resolve_augmentation_policy_defaults_for_few_shot_low_samples() -> None:
+    """Few-shot mode should be strongest when target class has very few samples."""
+    num_aug, probability, max_samples = TrainingService._resolve_augmentation_policy(
+        mode="few-shot",
+        config={},
+        train_size=12,
+        target_class_samples=6,
+    )
+
+    assert num_aug == 16
+    assert probability == 0.70
+    assert max_samples == 12000
+
+
+def test_resolve_augmentation_policy_defaults_for_full_retrain() -> None:
+    """Full retrain should use conservative defaults."""
+    num_aug, probability, max_samples = TrainingService._resolve_augmentation_policy(
+        mode="full-retrain",
+        config={},
+        train_size=100,
+    )
+
+    assert num_aug == 4
+    assert probability == 0.45
+    assert max_samples == 40000
+
+
+def test_resolve_augmentation_policy_caps_by_sample_budget() -> None:
+    """Requested huge multiplier should be bounded by max augmented sample budget."""
+    num_aug, probability, max_samples = TrainingService._resolve_augmentation_policy(
+        mode="few-shot",
+        config={
+            "num_augmentations_per_sample": 100,
+            "augmentation_probability": 0.9,
+            "max_augmented_train_samples": 80,
+        },
+        train_size=20,
+    )
+
+    # Budget allows at most (80 - 20) / 20 = 3 augmentations per sample.
+    assert num_aug == 3
+    assert probability == 0.9
+    assert max_samples == 80

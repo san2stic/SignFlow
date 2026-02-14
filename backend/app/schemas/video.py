@@ -32,4 +32,8 @@ class Video(BaseModel):
     type: Literal["training", "reference", "example"]
     landmarks_extracted: bool
     landmarks_path: str | None
+    detection_rate: float
+    quality_score: float
+    is_trainable: bool
+    landmark_feature_dim: int
     created_at: datetime

@@ -31,6 +31,7 @@ class ModelService:
             num_classes=model.num_classes,
             accuracy=model.accuracy,
             class_labels=model.class_labels or [],
+            metadata=model.artifact_metadata or {},
             training_session_id=model.training_session_id,
             file_path=Path(model.file_path).name,
             file_size_mb=model.file_size_mb,

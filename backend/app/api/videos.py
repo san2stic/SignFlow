@@ -33,6 +33,9 @@ class VideoResponse(BaseModel):
     landmarks_extracted: bool
     duration_ms: int
     fps: int
+    detection_rate: float
+    quality_score: float
+    is_trainable: bool
     created_at: datetime
 
 
@@ -61,6 +64,9 @@ class SuggestionResponse(BaseModel):
     landmarks_extracted: bool
     duration_ms: int
     fps: int
+    detection_rate: float
+    quality_score: float
+    is_trainable: bool
     created_at: datetime
 
 
@@ -86,6 +92,9 @@ def _to_video_response(video: Video) -> VideoResponse:
         landmarks_extracted=video.landmarks_extracted,
         duration_ms=video.duration_ms,
         fps=video.fps,
+        detection_rate=float(video.detection_rate or 0.0),
+        quality_score=float(video.quality_score or 0.0),
+        is_trainable=bool(video.is_trainable),
         created_at=video.created_at,
     )
 
@@ -217,6 +226,9 @@ def get_label_suggestions(
                 landmarks_extracted=video.landmarks_extracted,
                 duration_ms=video.duration_ms,
                 fps=video.fps,
+                detection_rate=float(video.detection_rate or 0.0),
+                quality_score=float(video.quality_score or 0.0),
+                is_trainable=bool(video.is_trainable),
                 created_at=video.created_at,
             ))
 

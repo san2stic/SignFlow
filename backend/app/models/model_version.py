@@ -28,6 +28,7 @@ class ModelVersion(Base):
     num_classes: Mapped[int] = mapped_column(default=1)
     accuracy: Mapped[float] = mapped_column(default=0.0)
     class_labels: Mapped[list[str]] = mapped_column(JSONType, default=list)
+    artifact_metadata: Mapped[dict] = mapped_column("metadata", JSONType, default=dict, deferred=True)
 
     training_session_id: Mapped[str] = mapped_column(
         String(36),

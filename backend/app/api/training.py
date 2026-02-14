@@ -38,8 +38,11 @@ def _deployment_state(session) -> dict[str, object]:
     final_val_float = float(final_val) if final_val is not None else None
     deployment_ready = bool(
         metrics.get(
-            "deployment_ready",
-            final_val_float is not None and final_val_float >= threshold,
+            "deployment_gate_passed",
+            metrics.get(
+                "deployment_ready",
+                final_val_float is not None and final_val_float >= threshold,
+            ),
         )
     )
 
@@ -79,6 +82,28 @@ def _serialize_session(session) -> TrainingSession:
             loss=float(metrics.get("loss", 0.0)),
             accuracy=float(metrics.get("accuracy", 0.0)),
             val_accuracy=float(metrics.get("val_accuracy", 0.0)),
+            macro_f1=float(metrics.get("macro_f1", 0.0)),
+            target_sign_f1=(
+                float(metrics["target_sign_f1"])
+                if metrics.get("target_sign_f1") is not None
+                else None
+            ),
+            open_set_fpr=(
+                float(metrics["open_set_fpr"])
+                if metrics.get("open_set_fpr") is not None
+                else None
+            ),
+            latency_p95_ms=(
+                float(metrics["latency_p95_ms"])
+                if metrics.get("latency_p95_ms") is not None
+                else None
+            ),
+            calibration_temperature=(
+                float(metrics["calibration_temperature"])
+                if metrics.get("calibration_temperature") is not None
+                else None
+            ),
+            deployment_gate_passed=bool(metrics.get("deployment_gate_passed", False)),
         )
         if metrics
         else None,

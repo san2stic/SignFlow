@@ -60,6 +60,8 @@ class SignFlowInferencePipeline:
         inference_num_views: int = 1,
         inference_temperature: float = 1.0,
         max_view_disagreement: float = 0.35,
+        calibration_temperature: float | None = None,
+        class_thresholds: dict[str, float] | None = None,
     ) -> None:
         """
         Initialize inference pipeline.
@@ -93,6 +95,15 @@ class SignFlowInferencePipeline:
         self.inference_num_views = max(1, int(inference_num_views))
         self.inference_temperature = float(max(0.1, inference_temperature))
         self.max_view_disagreement = float(max(1e-6, max_view_disagreement))
+        self.calibration_temperature = (
+            float(max(0.1, calibration_temperature))
+            if calibration_temperature is not None
+            else None
+        )
+        self.class_thresholds = {
+            str(key): float(np.clip(value, 0.0, 1.0))
+            for key, value in (class_thresholds or {}).items()
+        }
         self.device = torch.device(device)
         self.frame_buffer: deque[np.ndarray] = deque(maxlen=max_buffer_frames)
         self.hand_visibility_history: deque[float] = deque(maxlen=seq_len)
@@ -116,6 +127,21 @@ class SignFlowInferencePipeline:
         self.model: SignTransformer | None = None
         if model_path:
             self.load_model(model_path)
+
+    def set_calibration(
+        self,
+        *,
+        calibration_temperature: float | None = None,
+        class_thresholds: dict[str, float] | None = None,
+    ) -> None:
+        """Configure optional calibration temperature and per-class thresholds."""
+        if calibration_temperature is not None:
+            self.calibration_temperature = float(max(0.1, calibration_temperature))
+        if class_thresholds is not None:
+            self.class_thresholds = {
+                str(key): float(np.clip(value, 0.0, 1.0))
+                for key, value in class_thresholds.items()
+            }
 
     def load_model(self, model_path: str | Path) -> None:
         """
@@ -146,16 +172,15 @@ class SignFlowInferencePipeline:
         Args:
             labels: List of sign labels (class names)
         """
-        cleaned = [label for label in labels if label]
-        non_none = [label for label in cleaned if label != "NONE"]
+        cleaned = [str(label) for label in labels if label]
 
         if self.model is None:
-            self.labels = non_none
+            self.labels = cleaned
             logger.debug("labels_set", num_labels=len(self.labels))
             return
 
         expected = int(self.model.num_classes)
-        aligned = non_none
+        aligned = cleaned
         if len(aligned) != expected:
             logger.warning(
                 "label_count_mismatch",
@@ -277,10 +302,11 @@ class SignFlowInferencePipeline:
 
         predicted_label, predicted_confidence, alternatives = self._infer_window(enriched)
         adaptive_threshold = self._adaptive_threshold()
+        label_threshold = self._threshold_for_label(predicted_label)
         predicted_label, predicted_confidence = self._apply_prediction_filters(
             prediction=predicted_label,
             confidence=predicted_confidence,
-            threshold=adaptive_threshold,
+            threshold=max(adaptive_threshold, label_threshold),
         )
 
         # Reset for next sign
@@ -289,7 +315,7 @@ class SignFlowInferencePipeline:
         self._recording_frame_count = 0
         self.state = InferenceState.IDLE
 
-        if predicted_label != "NONE" and predicted_confidence >= adaptive_threshold:
+        if predicted_label != "NONE" and predicted_confidence >= max(adaptive_threshold, label_threshold):
             if not self.sentence_tokens or self.sentence_tokens[-1] != predicted_label:
                 self.sentence_tokens.append(predicted_label)
 
@@ -364,6 +390,8 @@ class SignFlowInferencePipeline:
             for idx in top_indices[1:top_k]:
                 if idx < len(runtime_labels):
                     alt_label = runtime_labels[idx]
+                    if alt_label in {"NONE", "[NONE]"}:
+                        continue
                     alt_conf = float(probs[idx])
                     alternatives.append({
                         "sign": alt_label,
@@ -380,6 +408,9 @@ class SignFlowInferencePipeline:
             # If confidence margin is too low, treat prediction as NONE.
             if calibrated_confidence <= 0.0:
                 return "NONE", 0.0, alternatives
+
+            if prediction in {"NONE", "[NONE]"}:
+                return "NONE", round(calibrated_confidence, 3), alternatives
 
             return prediction, round(calibrated_confidence, 3), alternatives
 
@@ -399,7 +430,8 @@ class SignFlowInferencePipeline:
             for view in views:
                 tensor = torch.from_numpy(view).float().unsqueeze(0).to(self.device)
                 logits = self.model(tensor)
-                probs = torch.softmax(logits / self.inference_temperature, dim=1)
+                softmax_temp = self.calibration_temperature or self.inference_temperature
+                probs = torch.softmax(logits / softmax_temp, dim=1)
                 stacked_probs.append(probs.squeeze(0))
 
         if not stacked_probs:
@@ -517,6 +549,18 @@ class SignFlowInferencePipeline:
         elif self._latest_frontend_confidence < 0.55:
             threshold += 0.04
         return float(min(0.95, threshold))
+
+    def _threshold_for_label(self, label: str) -> float:
+        """Return class-specific confidence threshold when available."""
+        if not label:
+            return 0.0
+        if label in self.class_thresholds:
+            return float(self.class_thresholds[label])
+        if label == "NONE" and "[NONE]" in self.class_thresholds:
+            return float(self.class_thresholds["[NONE]"])
+        if label == "[NONE]" and "NONE" in self.class_thresholds:
+            return float(self.class_thresholds["NONE"])
+        return 0.0
 
     def _apply_prediction_filters(
         self,
