@@ -119,6 +119,7 @@ class TrainingService:
         labels: list[int],
         *,
         val_ratio: float = 0.2,
+        min_val_samples_per_class: int = 1,
     ) -> tuple[np.ndarray, np.ndarray]:
         """Create stratified train/val split to stabilize minority classes."""
         if not labels:
@@ -132,6 +133,7 @@ class TrainingService:
         val_indices: list[int] = []
         rng = np.random.default_rng()
 
+        min_per_class = max(1, int(min_val_samples_per_class))
         for class_indices in by_label.values():
             shuffled = np.array(class_indices, dtype=np.int64)
             rng.shuffle(shuffled)
@@ -140,7 +142,7 @@ class TrainingService:
                 train_indices.extend(shuffled.tolist())
                 continue
 
-            val_count = max(1, int(len(shuffled) * val_ratio))
+            val_count = max(min_per_class, int(round(len(shuffled) * val_ratio)))
             val_count = min(val_count, max(1, len(shuffled) - 1))
             val_indices.extend(shuffled[:val_count].tolist())
             train_indices.extend(shuffled[val_count:].tolist())
@@ -179,6 +181,7 @@ class TrainingService:
         labels: list[int],
         *,
         val_ratio: float = 0.2,
+        min_val_samples_per_class: int = 1,
         apply_augmentation: bool = True,
         num_augmentations_per_sample: int = 5,
         augmentation_probability: float = 0.5,
@@ -198,6 +201,7 @@ class TrainingService:
         train_indices, val_indices = TrainingService._stratified_train_val_indices(
             labels,
             val_ratio=val_ratio,
+            min_val_samples_per_class=min_val_samples_per_class,
         )
 
         train_sequences = [sequences[index] for index in train_indices.tolist()]
@@ -1004,7 +1008,12 @@ class TrainingService:
 
                 none_sequences: list[np.ndarray] = []
                 if open_set_enabled:
-                    desired_none_count = max(8, min(256, len(sequences) // 4))
+                    if mode == "few-shot":
+                        desired_none_count = max(2, min(64, len(sequences) // 6))
+                        if target_count > 0:
+                            desired_none_count = min(desired_none_count, max(2, target_count // 2))
+                    else:
+                        desired_none_count = max(8, min(256, len(sequences) // 4))
                     none_sequences = self._generate_open_set_sequences(
                         labeled_sequences=sequences,
                         unlabeled_sequences=unlabeled_sequences,
@@ -1055,19 +1064,36 @@ class TrainingService:
                 )
 
                 # Split first, augment train only to avoid train/val leakage.
+                split_val_ratio = float(config.get("val_ratio", 0.25 if mode == "few-shot" else 0.2))
+                split_val_ratio = float(np.clip(split_val_ratio, 0.05, 0.5))
+                min_val_per_class = int(config.get("min_val_samples_per_class", 2 if mode == "few-shot" else 1))
+                min_val_per_class = max(1, min(8, min_val_per_class))
                 train_sequences, train_labels, val_sequences, val_labels = self._split_and_prepare_sequences(
                     sequences,
                     labels,
-                    val_ratio=0.2,
+                    val_ratio=split_val_ratio,
+                    min_val_samples_per_class=min_val_per_class,
                     apply_augmentation=bool(config.get("augmentation", True)),
                     num_augmentations_per_sample=num_aug_per_sample,
                     augmentation_probability=aug_probability,
                     max_augmented_train_samples=max_aug_train_samples,
                 )
+                min_val_samples_required = int(
+                    config.get("min_validation_samples", 3 if mode == "few-shot" else 8)
+                )
+                min_val_samples_required = max(1, min_val_samples_required)
+                if len(val_sequences) < min_val_samples_required:
+                    raise ValueError(
+                        "Validation split too small for reliable metrics "
+                        f"(val_samples={len(val_sequences)} < required={min_val_samples_required}). "
+                        "Add more clips before training."
+                    )
                 logger.info(
                     "dataset_split_ready",
                     train_samples=len(train_sequences),
                     val_samples=len(val_sequences),
+                    val_ratio=split_val_ratio,
+                    min_val_samples_per_class=min_val_per_class,
                     augmentation=bool(config.get("augmentation", True)),
                     augmentations_per_sample=num_aug_per_sample,
                     augmentation_probability=aug_probability,
@@ -1154,7 +1180,7 @@ class TrainingService:
                     use_focal_loss = False
 
                 teacher_model: SignTransformer | None = None
-                use_distillation = bool(config.get("use_distillation", mode == "few-shot"))
+                use_distillation = bool(config.get("use_distillation", False))
                 teacher_model_path = str(config.get("teacher_model_path", "")).strip()
                 if use_distillation:
                     try:
@@ -1164,6 +1190,16 @@ class TrainingService:
                             teacher_model = load_model_checkpoint(active_model.file_path, device=device)
                     except Exception as exc:  # noqa: BLE001
                         logger.warning("teacher_model_load_failed", error=str(exc))
+                        teacher_model = None
+                        use_distillation = False
+                if use_distillation and teacher_model is not None:
+                    teacher_num_classes = int(getattr(teacher_model, "num_classes", 0))
+                    if teacher_num_classes != int(num_classes):
+                        logger.warning(
+                            "distillation_disabled_class_mismatch",
+                            teacher_num_classes=teacher_num_classes,
+                            student_num_classes=int(num_classes),
+                        )
                         teacher_model = None
                         use_distillation = False
 

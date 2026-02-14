@@ -8,6 +8,8 @@ import { RecommendedActionMessage } from "./RecommendedActionMessage";
 export function TrainingProgress(): JSX.Element {
   const progress = useTrainingStore((state) => state.progress);
   const chartData = progress.metrics_history ?? [];
+  const maxObservedLoss = chartData.reduce((max, point) => Math.max(max, Number(point.loss ?? 0)), 0);
+  const lossAxisMax = Math.max(1, Math.ceil(maxObservedLoss * 10) / 10);
   const deploymentAccuracy =
     progress.final_val_accuracy !== null && progress.final_val_accuracy !== undefined
       ? progress.final_val_accuracy
@@ -40,13 +42,33 @@ export function TrainingProgress(): JSX.Element {
           <ResponsiveContainer width="100%" height={180}>
             <LineChart data={chartData}>
               <XAxis dataKey="epoch" tick={{ fill: "#94a3b8", fontSize: 11 }} />
-              <YAxis domain={[0, 1]} tick={{ fill: "#94a3b8", fontSize: 11 }} />
+              <YAxis
+                yAxisId="loss"
+                orientation="left"
+                domain={[0, lossAxisMax]}
+                tick={{ fill: "#94a3b8", fontSize: 11 }}
+              />
+              <YAxis
+                yAxisId="accuracy"
+                orientation="right"
+                domain={[0, 1]}
+                tick={{ fill: "#94a3b8", fontSize: 11 }}
+              />
               <Tooltip
                 contentStyle={{ backgroundColor: "#0f172a", border: "1px solid #334155", borderRadius: 8 }}
                 labelStyle={{ color: "#94a3b8" }}
               />
-              <Line type="monotone" dataKey="loss" name="Loss" stroke="#f59e0b" strokeWidth={2} dot={false} />
               <Line
+                yAxisId="loss"
+                type="monotone"
+                dataKey="loss"
+                name="Loss"
+                stroke="#f59e0b"
+                strokeWidth={2}
+                dot={false}
+              />
+              <Line
+                yAxisId="accuracy"
                 type="monotone"
                 dataKey="val_accuracy"
                 name="Val accuracy"
