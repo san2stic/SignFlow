@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 import app.services.training_service as training_service_module
 from app.services.training_service import TrainingService
@@ -126,3 +127,30 @@ def test_resolve_augmentation_policy_caps_by_sample_budget() -> None:
     assert num_aug == 3
     assert probability == 0.9
     assert max_samples == 80
+
+
+def test_validate_class_space_rejects_single_class_for_few_shot() -> None:
+    """Few-shot should fail fast when preprocessing yields only one class."""
+    with pytest.raises(ValueError, match="at least 2 classes"):
+        TrainingService._validate_class_space(
+            mode="few-shot",
+            num_classes=1,
+            open_set_enabled=True,
+            generated_none_count=0,
+        )
+
+
+def test_validate_class_space_allows_multi_class_training() -> None:
+    """Training should continue when at least two classes are available."""
+    TrainingService._validate_class_space(
+        mode="few-shot",
+        num_classes=2,
+        open_set_enabled=True,
+        generated_none_count=0,
+    )
+    TrainingService._validate_class_space(
+        mode="full-retrain",
+        num_classes=3,
+        open_set_enabled=False,
+        generated_none_count=0,
+    )

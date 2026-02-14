@@ -237,6 +237,7 @@ async def training_session_live(websocket: WebSocket, session_id: str) -> None:
                     "progress": session.progress,
                     "metrics": session.metrics or {},
                     "estimated_remaining": estimate_remaining_time(session.progress),
+                    "error_message": session.error_message,
                     **_deployment_state(session),
                 }
                 await websocket.send_json(payload)

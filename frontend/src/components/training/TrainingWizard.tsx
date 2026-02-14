@@ -1,6 +1,13 @@
 import { useEffect, useMemo, useState, type Ref, type RefObject } from "react";
 
-import { createSign, listSignVideos, listSigns, uploadSignVideo, type Sign as ApiSign } from "../../api/signs";
+import {
+  createSign,
+  listSignVideos,
+  listSigns,
+  uploadSignVideo,
+  type Sign as ApiSign,
+  type SignVideo
+} from "../../api/signs";
 import { useMediaPipe } from "../../hooks/useMediaPipe";
 import { useTraining } from "../../hooks/useTraining";
 import { useWebSocket } from "../../hooks/useWebSocket";
@@ -21,6 +28,7 @@ interface LiveTrainingPayload {
   status: string;
   progress: number;
   estimated_remaining?: string;
+  error_message?: string | null;
   metrics: {
     loss?: number;
     accuracy?: number;
@@ -38,6 +46,15 @@ interface AssignedSignTarget {
   name: string;
   trainingSampleCount?: number;
   videoCount?: number;
+}
+
+const QUALITY_MIN_DETECTION_RATE = 0.8;
+
+function isTrainingCandidate(
+  video: Pick<SignVideo, "landmarks_extracted" | "detection_rate">,
+  minDetectionRate = QUALITY_MIN_DETECTION_RATE
+): boolean {
+  return Boolean(video.landmarks_extracted) && Number(video.detection_rate ?? 0) >= minDetectionRate;
 }
 
 function normalizeSignName(rawName: string): string {
@@ -138,7 +155,7 @@ export function TrainingWizard({ videoRef, cameraRef, initialAssignedSign }: Tra
     void listSignVideos(assignedSignTarget.id)
       .then((videos) => {
         if (cancelled) return;
-        const eligibleVideos = videos.filter((video) => video.landmarks_extracted).length;
+        const eligibleVideos = videos.filter((video) => isTrainingCandidate(video)).length;
         setExistingTrainingClipCount(eligibleVideos);
       })
       .catch(() => {
@@ -231,7 +248,10 @@ export function TrainingWizard({ videoRef, cameraRef, initialAssignedSign }: Tra
       }
 
       if (payload.status === "failed") {
-        setError("Training failed. Please add more high-quality clips and retry.");
+        const message =
+          payload.error_message?.trim() ||
+          "Training failed. No eligible clips were found after landmark quality filtering.";
+        setError(message);
       }
     }
   });
@@ -307,13 +327,33 @@ export function TrainingWizard({ videoRef, cameraRef, initialAssignedSign }: Tra
         }
       }
 
+      const uploadedVideos: SignVideo[] = [];
       for (const clip of validClips) {
-        await uploadSignVideo(sign.id, clip.file, {
+        const uploaded = await uploadSignVideo(sign.id, clip.file, {
           type: "training",
           durationMs: clip.durationMs,
           fps: 30,
           resolution: "640x480"
         });
+        uploadedVideos.push(uploaded);
+      }
+
+      const eligibleUploadedCount = uploadedVideos.filter((video) => isTrainingCandidate(video)).length;
+      const totalEligibleCount = existingTrainingClipCount + eligibleUploadedCount;
+      const detectionFloorPercent = Math.round(QUALITY_MIN_DETECTION_RATE * 100);
+
+      if (!assignedSignTarget && eligibleUploadedCount < 1) {
+        setError(
+          `No uploaded clip passed landmark extraction quality checks (detection >= ${detectionFloorPercent}%). Record clearer clips and retry.`
+        );
+        return;
+      }
+
+      if (assignedSignTarget && totalEligibleCount < 1) {
+        setError(
+          `No eligible clips found for training (detection >= ${detectionFloorPercent}%). Add higher-quality clips and retry.`
+        );
+        return;
       }
 
       resetProgress();

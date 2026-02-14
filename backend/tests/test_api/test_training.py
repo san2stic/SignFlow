@@ -144,3 +144,26 @@ def test_deploy_training_session_blocked_when_not_ready() -> None:
 
     assert response.status_code == 409
     assert "threshold" in response.json()["detail"].lower()
+
+
+def test_training_live_stream_exposes_failure_error_message() -> None:
+    """Live training websocket should return persisted session error message."""
+    with SessionLocal() as db:
+        session = TrainingSessionModel(
+            mode="few-shot",
+            status="failed",
+            progress=15.0,
+            config={"epochs": 5, "learning_rate": 1e-4, "augmentation": True},
+            metrics={"loss": 1.0, "accuracy": 0.0, "val_accuracy": 0.0},
+            error_message="Preprocessing failed: no eligible training videos",
+        )
+        db.add(session)
+        db.commit()
+        session_id = session.id
+
+    with TestClient(app) as client:
+        with client.websocket_connect(f"/api/v1/training/sessions/{session_id}/live") as websocket:
+            payload = websocket.receive_json()
+
+    assert payload["status"] == "failed"
+    assert payload["error_message"] == "Preprocessing failed: no eligible training videos"

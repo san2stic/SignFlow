@@ -18,6 +18,7 @@ let wsMessageHandler:
   | ((payload: {
       status: string;
       progress: number;
+      error_message?: string | null;
       metrics: { loss?: number; accuracy?: number; val_accuracy?: number; current_epoch?: number };
       deployment_ready?: boolean;
       deploy_threshold?: number;
@@ -30,7 +31,23 @@ vi.mock("../../../api/signs", () => ({
   createSign: vi.fn(async () => ({ id: "sign-1", name: "Bonjour" })),
   listSigns: vi.fn(async () => ({ items: [] })),
   listSignVideos: vi.fn(async () => []),
-  uploadSignVideo: vi.fn(async () => ({ id: "video-1" }))
+  uploadSignVideo: vi.fn(async () => ({
+    id: "video-1",
+    sign_id: "sign-1",
+    file_path: "/tmp/video-1.mp4",
+    thumbnail_path: null,
+    duration_ms: 2500,
+    fps: 30,
+    resolution: "640x480",
+    type: "training",
+    landmarks_extracted: true,
+    landmarks_path: "/tmp/video-1.npy",
+    detection_rate: 0.91,
+    quality_score: 0.86,
+    is_trainable: true,
+    landmark_feature_dim: 225,
+    created_at: new Date().toISOString()
+  }))
 }));
 
 vi.mock("../../../hooks/useMediaPipe", () => ({
@@ -173,6 +190,11 @@ describe("TrainingWizard", () => {
         resolution: "640x480",
         type: "training",
         landmarks_extracted: true,
+        landmarks_path: "/tmp/video.npy",
+        detection_rate: 0.92,
+        quality_score: 0.88,
+        is_trainable: true,
+        landmark_feature_dim: 225,
         created_at: new Date().toISOString()
       }
     ]);
@@ -197,5 +219,31 @@ describe("TrainingWizard", () => {
     });
     expect(vi.mocked(createSign)).not.toHaveBeenCalled();
     expect(vi.mocked(uploadSignVideo)).not.toHaveBeenCalled();
+  });
+
+  it("shows backend failure reason from live payload", async () => {
+    const user = userEvent.setup();
+
+    render(<TrainingWizard videoRef={createRef<HTMLVideoElement>()} />);
+
+    await user.type(screen.getByLabelText("Sign Name"), "Bonjour");
+    await user.click(screen.getByRole("button", { name: "Next" }));
+    await user.click(screen.getByRole("button", { name: "Inject valid clips" }));
+    await user.click(screen.getByRole("button", { name: "Start Training" }));
+
+    act(() => {
+      wsMessageHandler?.({
+        status: "failed",
+        progress: 12,
+        error_message: "Preprocessing failed: No eligible labeled videos available after quality filtering",
+        metrics: {}
+      });
+    });
+
+    expect(
+      await screen.findByText(
+        "Preprocessing failed: No eligible labeled videos available after quality filtering"
+      )
+    ).toBeInTheDocument();
   });
 });

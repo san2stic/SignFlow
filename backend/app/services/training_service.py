@@ -74,6 +74,47 @@ class TrainingService:
         return workers
 
     @staticmethod
+    def _has_ready_landmarks(video: Video) -> bool:
+        """Check whether a video has extracted landmarks available on disk."""
+        return bool(video.landmarks_extracted and video.landmarks_path)
+
+    @staticmethod
+    def _passes_detection_gate(video: Video, *, min_detection_rate: float) -> bool:
+        """Check if clip quality is sufficient for training by detection-rate gate."""
+        if not TrainingService._has_ready_landmarks(video):
+            return False
+        detection_rate = float(video.detection_rate or 0.0)
+        return detection_rate >= float(min_detection_rate)
+
+    @staticmethod
+    def _validate_class_space(
+        *,
+        mode: str,
+        num_classes: int,
+        open_set_enabled: bool,
+        generated_none_count: int,
+    ) -> None:
+        """Fail fast when supervision has no discriminative class boundary."""
+        if num_classes >= 2:
+            return
+
+        if mode == "few-shot":
+            raise ValueError(
+                "Few-shot training requires at least 2 classes after preprocessing. "
+                f"Got num_classes={num_classes}. "
+                f"Open-set enabled={open_set_enabled}, generated_none={generated_none_count}. "
+                "Add labeled videos for another sign, provide idle unlabeled clips for [NONE], "
+                "or start from an existing multi-class checkpoint."
+            )
+
+        raise ValueError(
+            "Training requires at least 2 classes after preprocessing. "
+            f"Got num_classes={num_classes}. "
+            f"Open-set enabled={open_set_enabled}, generated_none={generated_none_count}. "
+            "Collect additional sign classes or [NONE] clips."
+        )
+
+    @staticmethod
     def _stratified_train_val_indices(
         labels: list[int],
         *,
@@ -773,20 +814,63 @@ class TrainingService:
                 quality_min_detection_rate = float(config.get("quality_min_detection_rate", 0.8))
                 open_set_enabled = bool(config.get("open_set_enabled", True))
 
-                # Labeled + quality-filtered videos only for supervised classes.
-                videos = db.scalars(
+                # Supervised classes: labeled clips with landmarks passing detection gate.
+                # We intentionally gate by measured detection_rate rather than is_trainable,
+                # so config-driven threshold changes immediately affect eligibility.
+                all_labeled_videos = db.scalars(
                     select(Video)
-                    .where(
-                        Video.sign_id.is_not(None),
-                        Video.landmarks_extracted.is_(True),
-                        Video.landmarks_path.is_not(None),
-                        Video.is_trainable.is_(True),
-                        Video.detection_rate >= quality_min_detection_rate,
-                    )
+                    .where(Video.sign_id.is_not(None))
                     .order_by(Video.created_at.asc())
                 ).all()
+                videos = [
+                    video
+                    for video in all_labeled_videos
+                    if self._passes_detection_gate(video, min_detection_rate=quality_min_detection_rate)
+                ]
+
+                labeled_total = len(all_labeled_videos)
+                labeled_with_landmarks = sum(1 for video in all_labeled_videos if self._has_ready_landmarks(video))
+                labeled_passing_detection = len(videos)
+                labeled_marked_trainable = sum(
+                    1
+                    for video in all_labeled_videos
+                    if self._has_ready_landmarks(video) and bool(video.is_trainable)
+                )
+
+                target_videos = (
+                    [video for video in all_labeled_videos if video.sign_id == sign_id]
+                    if sign_id
+                    else []
+                )
+                target_total = len(target_videos)
+                target_with_landmarks = sum(1 for video in target_videos if self._has_ready_landmarks(video))
+                target_passing_detection = sum(
+                    1
+                    for video in target_videos
+                    if self._passes_detection_gate(video, min_detection_rate=quality_min_detection_rate)
+                )
+
+                logger.info(
+                    "training_video_eligibility",
+                    mode=mode,
+                    sign_id=sign_id,
+                    quality_min_detection_rate=quality_min_detection_rate,
+                    labeled_total=labeled_total,
+                    labeled_with_landmarks=labeled_with_landmarks,
+                    labeled_passing_detection=labeled_passing_detection,
+                    labeled_marked_trainable=labeled_marked_trainable,
+                    target_total=target_total,
+                    target_with_landmarks=target_with_landmarks,
+                    target_passing_detection=target_passing_detection,
+                )
+
                 if not videos:
-                    raise ValueError("No trainable labeled videos with extracted landmarks available")
+                    raise ValueError(
+                        "No eligible labeled videos available after quality filtering "
+                        f"(required detection_rate >= {quality_min_detection_rate:.2f}). "
+                        f"Dataset: total={labeled_total}, with_landmarks={labeled_with_landmarks}, "
+                        f"passing_detection={labeled_passing_detection}, marked_trainable={labeled_marked_trainable}."
+                    )
 
                 logger.info(
                     "loading_landmarks",
@@ -802,7 +886,12 @@ class TrainingService:
                 if mode == "few-shot":
                     target_count = sum(1 for video in videos if video.sign_id == sign_id)
                     if target_count == 0:
-                        raise ValueError("few-shot requested sign has no videos with extracted landmarks")
+                        raise ValueError(
+                            "few-shot requested sign has no eligible videos after quality filtering "
+                            f"(required detection_rate >= {quality_min_detection_rate:.2f}). "
+                            f"Target sign: total={target_total}, with_landmarks={target_with_landmarks}, "
+                            f"passing_detection={target_passing_detection}."
+                        )
 
                 # Load supervised landmarks
                 sequences: list[np.ndarray] = []
@@ -866,6 +955,7 @@ class TrainingService:
                 if len(sequences) < 2:
                     raise ValueError("Need at least 2 training samples for train/validation split")
 
+                none_sequences: list[np.ndarray] = []
                 if open_set_enabled:
                     desired_none_count = max(8, min(256, len(sequences) // 4))
                     none_sequences = self._generate_open_set_sequences(
@@ -899,6 +989,12 @@ class TrainingService:
 
                 num_classes = len(label_map)
                 class_labels = [item[0] for item in sorted(label_map.items(), key=lambda item: item[1])]
+                self._validate_class_space(
+                    mode=mode,
+                    num_classes=num_classes,
+                    open_set_enabled=open_set_enabled,
+                    generated_none_count=len(none_sequences),
+                )
                 logger.info("data_loaded", num_samples=len(sequences), num_classes=num_classes)
 
                 requested_train_size = int(round(len(sequences) * 0.8))

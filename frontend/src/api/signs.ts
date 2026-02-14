@@ -36,6 +36,10 @@ export interface SignVideo {
   type: "training" | "reference" | "example";
   landmarks_extracted: boolean;
   landmarks_path?: string;
+  detection_rate: number;
+  quality_score: number;
+  is_trainable: boolean;
+  landmark_feature_dim: number;
   created_at: string;
 }
 
