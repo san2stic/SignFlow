@@ -1,0 +1,14 @@
+artifact_uri: file:///app/data/models/mlruns/324040898016677093/0dc5cea4423b4e2f9ec6a677561df083/artifacts
+end_time: 1771279536095
+entry_point_name: ''
+experiment_id: '324040898016677093'
+lifecycle_stage: active
+run_id: 0dc5cea4423b4e2f9ec6a677561df083
+run_name: capable-auk-759
+source_name: ''
+source_type: 4
+source_version: ''
+start_time: 1771279105373
+status: 3
+tags: []
+user_id: signflow

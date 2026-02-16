@@ -12,6 +12,7 @@ from app.config import get_settings
 from app.database import SessionLocal
 from app.main import app
 from app.models.sign import Sign
+from app.models.video import Video
 from app.services import sign_service as sign_service_module
 from app.services.search_service import SearchBackendUnavailable
 
@@ -61,6 +62,51 @@ def test_upload_video_rejects_invalid_file() -> None:
 
     assert response.status_code == 400
     assert "unsupported" in response.json()["detail"].lower()
+
+
+def test_list_sign_videos_normalizes_legacy_video_type() -> None:
+    """List endpoint should not fail on legacy type values stored in DB."""
+    suffix = uuid4().hex[:8]
+    legacy_video_id = str(uuid4())
+
+    with SessionLocal() as db:
+        sign = Sign(
+            name=f"Legacy Video Target {suffix}",
+            slug=f"legacy-video-target-{suffix}",
+            description="Target",
+            tags=[],
+            variants=[],
+        )
+        db.add(sign)
+        db.flush()
+        sign_id = sign.id
+
+        db.add(
+            Video(
+                id=legacy_video_id,
+                sign_id=sign_id,
+                file_path="/tmp/legacy.mp4",
+                type="legacy",
+                landmarks_extracted=False,
+                landmarks_path=None,
+            )
+        )
+        db.commit()
+
+    with TestClient(app) as client:
+        response = client.get(f"/api/v1/signs/{sign_id}/videos")
+
+    assert response.status_code == 200
+    payload = response.json()
+    legacy_item = next((item for item in payload if item["id"] == legacy_video_id), None)
+    assert legacy_item is not None
+    assert legacy_item["type"] == "reference"
+
+    with SessionLocal() as db:
+        sign = db.scalar(select(Sign).where(Sign.id == sign_id))
+        if sign:
+            db.delete(sign)
+            db.commit()
 
 
 def test_get_sign_backlinks_returns_referencing_signs() -> None:

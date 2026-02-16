@@ -9,6 +9,7 @@ from pathlib import Path
 import numpy as np
 import structlog
 from fastapi import HTTPException, UploadFile, status
+from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -26,10 +27,30 @@ logger = structlog.get_logger(__name__)
 class MediaService:
     """Handles video lifecycle for sign samples and references."""
 
+    ALLOWED_VIDEO_TYPES = {"training", "reference", "example"}
+    LEGACY_VIDEO_TYPE_ALIASES = {
+        "train": "training",
+        "training_video": "training",
+        "ref": "reference",
+        "reference_video": "reference",
+        "sample": "example",
+    }
+
     @staticmethod
     def _public_video_path(video_id: str) -> str:
         """Build safe API path for video playback."""
         return f"/api/v1/media/{video_id}/stream"
+
+    def _normalize_video_type(self, raw_type: str | None) -> str:
+        """Normalize legacy/unexpected DB values to valid API enum."""
+        candidate = (raw_type or "").strip().lower()
+        if not candidate:
+            return "reference"
+
+        candidate = self.LEGACY_VIDEO_TYPE_ALIASES.get(candidate, candidate)
+        if candidate in self.ALLOWED_VIDEO_TYPES:
+            return candidate
+        return "reference"
 
     @staticmethod
     def _estimate_quality_score(landmarks: np.ndarray, detection_rate: float) -> tuple[float, bool]:
@@ -61,6 +82,15 @@ class MediaService:
 
     def _to_schema(self, video: Video) -> VideoSchema:
         """Convert ORM object into public-safe schema."""
+        normalized_type = self._normalize_video_type(video.type)
+        if normalized_type != (video.type or "").strip().lower():
+            logger.warning(
+                "coercing_legacy_video_type",
+                video_id=str(video.id),
+                original_type=video.type,
+                normalized_type=normalized_type,
+            )
+
         return VideoSchema(
             id=video.id,
             sign_id=video.sign_id,
@@ -69,7 +99,7 @@ class MediaService:
             duration_ms=video.duration_ms,
             fps=video.fps,
             resolution=video.resolution,
-            type=video.type,
+            type=normalized_type,
             landmarks_extracted=video.landmarks_extracted,
             landmarks_path=None,
             detection_rate=float(video.detection_rate or 0.0),
@@ -230,7 +260,19 @@ class MediaService:
     def list_sign_videos(self, db: Session, sign_id: str) -> list[VideoSchema]:
         """Return all videos for a sign sorted by creation timestamp."""
         videos = db.scalars(select(Video).where(Video.sign_id == sign_id).order_by(Video.created_at.desc())).all()
-        return [self._to_schema(video) for video in videos]
+        payload: list[VideoSchema] = []
+        for video in videos:
+            try:
+                payload.append(self._to_schema(video))
+            except ValidationError as exc:
+                # Do not fail the whole endpoint because of one malformed legacy row.
+                logger.warning(
+                    "skipping_invalid_video_row",
+                    sign_id=sign_id,
+                    video_id=str(video.id),
+                    error=str(exc),
+                )
+        return payload
 
     def delete_video(self, db: Session, video_id: str) -> bool:
         """Delete a video record and local file if present."""
