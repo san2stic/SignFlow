@@ -104,3 +104,54 @@ def test_trainer_curriculum_progressively_expands_train_subset() -> None:
     assert len(metrics) == 3
     assert seen_sizes[0] < seen_sizes[-1]
     assert seen_sizes[-1] == len(train_dataset)
+
+
+def test_save_model_logs_checkpoint_artifact_to_mlflow_run(tmp_path) -> None:
+    """Checkpoint save should also push artifact + metadata into MLflow."""
+    model = SignTransformer(num_features=ENRICHED_FEATURE_DIM, num_classes=2)
+    config = TrainingConfig(
+        num_epochs=1,
+        batch_size=2,
+        num_workers=0,
+        device="cpu",
+        use_mlflow=True,
+    )
+    trainer = SignTrainer(model=model, config=config)
+
+    calls: list[tuple[str, object]] = []
+
+    class _FakeTracker:
+        def start(
+            self,
+            run_name: str | None = None,
+            tags: dict[str, str] | None = None,
+            run_id: str | None = None,
+        ) -> str:
+            calls.append(("start", run_id or run_name or "generated"))
+            return run_id or "generated-run-id"
+
+        def log_artifact(self, local_path, artifact_path=None) -> None:  # type: ignore[no-untyped-def]
+            calls.append(("artifact", str(local_path), artifact_path))
+
+        def log_dict(self, dictionary: dict, filename: str) -> None:
+            calls.append(("dict", filename, bool(dictionary)))
+
+        def end(self) -> None:
+            calls.append(("end", True))
+
+    trainer._mlflow_tracker = _FakeTracker()  # type: ignore[assignment]
+    trainer.mlflow_run_id = "run-abc-123"
+
+    checkpoint_path = tmp_path / "model.pt"
+    trainer.save_model(
+        checkpoint_path,
+        class_labels=["hello", "bye"],
+        metadata={"threshold": 0.8},
+    )
+
+    assert checkpoint_path.exists()
+    assert ("start", "run-abc-123") in calls
+    assert ("artifact", str(checkpoint_path), "model") in calls
+    assert ("dict", "model/training_config.json", True) in calls
+    assert ("dict", "model/metadata.json", True) in calls
+    assert ("end", True) in calls

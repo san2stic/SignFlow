@@ -82,8 +82,52 @@ class MLFlowTracker:
             logger.error("mlflow_experiment_setup_failed", error=str(e))
             self.enabled = False
 
+    def start(
+        self,
+        run_name: str | None = None,
+        tags: dict[str, str] | None = None,
+        run_id: str | None = None,
+    ) -> str | None:
+        """Start one MLflow run and keep it active until ``end`` is called."""
+        if not self.enabled:
+            return None
+        if self._active_run is not None:
+            return self._active_run.info.run_id
+
+        try:
+            if run_id:
+                self._active_run = mlflow.start_run(run_id=run_id)
+            else:
+                self._active_run = mlflow.start_run(run_name=run_name, tags=tags)
+            run_id = self._active_run.info.run_id
+            logger.info("mlflow_run_started", run_id=run_id, name=run_name)
+            return run_id
+        except Exception as e:
+            logger.error("mlflow_run_failed", error=str(e))
+            self._active_run = None
+            return None
+
+    def end(self) -> None:
+        """End the currently active MLflow run, if any."""
+        if not self.enabled or self._active_run is None:
+            return
+
+        run_id = self._active_run.info.run_id
+        try:
+            mlflow.end_run()
+            logger.info("mlflow_run_ended", run_id=run_id)
+        except Exception as e:
+            logger.error("mlflow_end_run_failed", error=str(e))
+        finally:
+            self._active_run = None
+
     @contextlib.contextmanager
-    def start_run(self, run_name: str | None = None, tags: dict[str, str] | None = None):
+    def start_run(
+        self,
+        run_name: str | None = None,
+        tags: dict[str, str] | None = None,
+        run_id: str | None = None,
+    ):
         """
         Start an MLflow run as a context manager.
 
@@ -98,22 +142,11 @@ class MLFlowTracker:
             yield None
             return
 
+        self.start(run_name=run_name, tags=tags, run_id=run_id)
         try:
-            self._active_run = mlflow.start_run(run_name=run_name, tags=tags)
-            logger.info("mlflow_run_started", run_id=self._active_run.info.run_id, name=run_name)
             yield self._active_run
-        except Exception as e:
-            logger.error("mlflow_run_failed", error=str(e))
-            yield None
         finally:
-            if self._active_run is not None:
-                try:
-                    mlflow.end_run()
-                    logger.info("mlflow_run_ended", run_id=self._active_run.info.run_id)
-                except Exception as e:
-                    logger.error("mlflow_end_run_failed", error=str(e))
-                finally:
-                    self._active_run = None
+            self.end()
 
     def log_params(self, params: dict[str, Any]) -> None:
         """

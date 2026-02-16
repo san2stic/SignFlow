@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import math
+import random
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -22,7 +23,7 @@ from app.ml.curriculum import CurriculumSampler
 from app.ml.distillation import DistillationTrainer
 from app.ml.dataset import LandmarkDataset
 from app.ml.model import SignTransformer
-from app.ml.tracking import create_default_tracker
+from app.ml.tracking import MLFlowTracker, create_default_tracker
 from app.ml.gpu_manager import GPUManager, GPUConfig, get_gpu_manager
 
 logger = structlog.get_logger(__name__)
@@ -87,10 +88,17 @@ class TrainingConfig:
     weighted_sampler_min: float = 0.25
     weighted_sampler_max: float = 5.0
 
+    # Reproducibility
+    seed: int = 42
+
     # MLflow tracking
     use_mlflow: bool = True
     mlflow_run_name: str | None = None
     mlflow_tags: dict[str, str] | None = None
+
+    # [MLflow Sentinel] Minimum validation set size guard
+    min_val_size_warn: int = 20
+    min_val_size_error: int = 0  # 0 = no hard block
 
 
 @dataclass
@@ -270,6 +278,8 @@ class SignTrainer:
         self.best_model_state: dict[str, torch.Tensor] | None = None
         self.epochs_without_improvement = 0
         self.metrics_history: list[TrainingMetrics] = []
+        self._mlflow_tracker: MLFlowTracker | None = None
+        self.mlflow_run_id: str | None = None
 
         # EMA state (helps stabilization for few-shot and noisy samples).
         self.ema_state: dict[str, torch.Tensor] | None = None
@@ -740,6 +750,92 @@ class SignTrainer:
 
         return avg_loss, accuracy
 
+    def _compute_eval_report(self, val_loader: DataLoader) -> dict:
+        """[MLflow Sentinel] Compute F1, precision, recall and confusion matrix."""
+        all_preds: list[int] = []
+        all_labels: list[int] = []
+
+        self.model.eval()  # PyTorch inference mode
+        with self._swap_to_ema_weights(), torch.no_grad():
+            for landmarks, labels in val_loader:
+                landmarks = landmarks.to(self.device)
+                labels = labels.to(self.device)
+                with self._autocast_context():
+                    logits = self.model(landmarks)
+                preds = torch.argmax(logits, dim=1)
+                all_preds.extend(preds.cpu().tolist())
+                all_labels.extend(labels.cpu().tolist())
+
+        if not all_labels:
+            return {}
+
+        num_classes = self.model.num_classes
+        tp = [0] * num_classes
+        fp = [0] * num_classes
+        fn = [0] * num_classes
+        confusion = [[0] * num_classes for _ in range(num_classes)]
+
+        for true, pred in zip(all_labels, all_preds):
+            confusion[true][pred] += 1
+            if pred == true:
+                tp[pred] += 1
+            else:
+                fp[pred] += 1
+                fn[true] += 1
+
+        precision_per_class = []
+        recall_per_class = []
+        f1_per_class = []
+        support_per_class = []
+
+        for c in range(num_classes):
+            p = tp[c] / (tp[c] + fp[c]) if (tp[c] + fp[c]) > 0 else 0.0
+            r = tp[c] / (tp[c] + fn[c]) if (tp[c] + fn[c]) > 0 else 0.0
+            f1 = 2 * p * r / (p + r) if (p + r) > 0 else 0.0
+            support = sum(1 for lbl in all_labels if lbl == c)
+            precision_per_class.append(round(p, 4))
+            recall_per_class.append(round(r, 4))
+            f1_per_class.append(round(f1, 4))
+            support_per_class.append(support)
+
+        total_support = sum(support_per_class)
+        f1_macro = sum(f1_per_class) / num_classes if num_classes > 0 else 0.0
+        precision_macro = sum(precision_per_class) / num_classes if num_classes > 0 else 0.0
+        recall_macro = sum(recall_per_class) / num_classes if num_classes > 0 else 0.0
+        f1_weighted = (
+            sum(f * s for f, s in zip(f1_per_class, support_per_class)) / total_support
+            if total_support > 0 else 0.0
+        )
+
+        report = {
+            "f1_macro": round(f1_macro, 4),
+            "f1_weighted": round(f1_weighted, 4),
+            "precision_macro": round(precision_macro, 4),
+            "recall_macro": round(recall_macro, 4),
+            "per_class": {
+                str(c): {
+                    "precision": precision_per_class[c],
+                    "recall": recall_per_class[c],
+                    "f1": f1_per_class[c],
+                    "support": support_per_class[c],
+                }
+                for c in range(num_classes)
+            },
+            "confusion_matrix": confusion,
+            "val_size": len(all_labels),
+        }
+
+        logger.info(
+            "evaluation_report",
+            f1_macro=report["f1_macro"],
+            f1_weighted=report["f1_weighted"],
+            precision_macro=report["precision_macro"],
+            recall_macro=report["recall_macro"],
+            val_size=report["val_size"],
+        )
+
+        return report
+
     def _estimate_curriculum_confidence(self, dataset: LandmarkDataset) -> dict[int, float]:
         """Estimate per-sample true-label confidence for confidence-based curriculum."""
         if len(dataset) == 0:
@@ -787,16 +883,57 @@ class SignTrainer:
         Returns:
             List of training metrics for each epoch
         """
+        # [MLflow Sentinel] Fix reproducibility — seed all RNGs
+        _seed = self.config.seed
+        random.seed(_seed)
+        np.random.seed(_seed)
+        torch.manual_seed(_seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(_seed)
+
+        # [MLflow Sentinel] Validate minimum val_size
+        val_size = len(val_dataset)
+        if self.config.min_val_size_error > 0 and val_size < self.config.min_val_size_error:
+            raise ValueError(
+                f"Validation set too small: {val_size} < {self.config.min_val_size_error}. "
+                "Set config.min_val_size_error=0 to disable this check."
+            )
+        if val_size < self.config.min_val_size_warn:
+            logger.warning(
+                "small_validation_set",
+                val_size=val_size,
+                recommended_min=self.config.min_val_size_warn,
+                msg=f"val_size={val_size} is too small for reliable evaluation. "
+                    f"Metrics may have high variance. Recommended: >= {self.config.min_val_size_warn}.",
+            )
+
+        # [MLflow Sentinel] Warn if model is over-parameterized for dataset size
+        train_size = len(train_dataset)
+        num_params = sum(p.numel() for p in self.model.parameters())
+        params_per_sample = num_params / max(train_size, 1)
+        if params_per_sample > 100:
+            logger.warning(
+                "over_parameterized_model",
+                num_params=num_params,
+                train_size=train_size,
+                params_per_sample=round(params_per_sample, 1),
+                msg=f"Model has {num_params:,} params for {train_size} samples "
+                    f"(ratio {params_per_sample:.0f}:1). Consider using LIGHTWEIGHT_CONFIG "
+                    f"from model_configs.py for better generalization.",
+            )
+
         logger.info(
             "starting_training",
             num_epochs=self.config.num_epochs,
             train_size=len(train_dataset),
-            val_size=len(val_dataset),
+            val_size=val_size,
             batch_size=self.config.batch_size,
+            seed=_seed,
         )
 
         # Initialize MLflow tracker
         mlflow_tracker = create_default_tracker(enabled=self.config.use_mlflow)
+        self._mlflow_tracker = mlflow_tracker
 
         self._configure_criterion(train_dataset)
 
@@ -832,6 +969,7 @@ class SignTrainer:
             run_name=self.config.mlflow_run_name,
             tags=self.config.mlflow_tags or {}
         ):
+            self.mlflow_run_id = mlflow_tracker.run_id
             # Log hyperparameters
             mlflow_tracker.log_params({
                 "num_epochs": self.config.num_epochs,
@@ -863,7 +1001,8 @@ class SignTrainer:
                 "num_classes": self.model.num_classes,
                 "num_features": self.model.num_features,
                 "train_size": len(train_dataset),
-                "val_size": len(val_dataset),
+                "val_size": val_size,
+                "seed": _seed,
             })
 
             # Training loop
@@ -990,17 +1129,36 @@ class SignTrainer:
                 self.model.load_state_dict(self.best_model_state)
                 logger.info("restored_best_model", val_loss=self.best_val_loss)
 
+            # [MLflow Sentinel] Compute detailed evaluation metrics
+            eval_report = self._compute_eval_report(val_loader)
+
             # Log final metrics summary to MLflow
             if self.metrics_history:
                 final_metrics = self.metrics_history[-1]
-                mlflow_tracker.log_metrics({
+                final_mlflow_metrics: dict[str, float] = {
                     "final_train_loss": final_metrics.train_loss,
                     "final_train_accuracy": final_metrics.train_accuracy,
                     "final_val_loss": final_metrics.val_loss,
                     "final_val_accuracy": final_metrics.val_accuracy,
                     "best_val_loss": self.best_val_loss,
                     "total_epochs": len(self.metrics_history),
-                })
+                }
+                # [MLflow Sentinel] Add F1/precision/recall if available
+                if eval_report:
+                    final_mlflow_metrics.update({
+                        "val_f1_macro": eval_report["f1_macro"],
+                        "val_f1_weighted": eval_report["f1_weighted"],
+                        "val_precision_macro": eval_report["precision_macro"],
+                        "val_recall_macro": eval_report["recall_macro"],
+                    })
+                mlflow_tracker.log_metrics(final_mlflow_metrics)
+
+            # [MLflow Sentinel] Log artifacts: classification report + best model
+            if eval_report:
+                mlflow_tracker.log_dict(eval_report, "classification_report.json")
+            # Log best model checkpoint
+            if self.best_model_state is not None:
+                mlflow_tracker.log_model(self.model, artifact_path="best_model")
 
         return self.metrics_history
 
@@ -1094,6 +1252,31 @@ class SignTrainer:
 
         torch.save(checkpoint, save_path)
         logger.info("model_saved", path=str(save_path))
+
+        if not self.config.use_mlflow:
+            return
+
+        tracker = self._mlflow_tracker or create_default_tracker(enabled=True)
+        resumed_run_id: str | None = None
+
+        if self.mlflow_run_id:
+            resumed_run_id = tracker.start(run_id=self.mlflow_run_id)
+        if resumed_run_id is None:
+            resumed_run_id = tracker.start(
+                run_name=self.config.mlflow_run_name,
+                tags=self.config.mlflow_tags or {},
+            )
+        self.mlflow_run_id = resumed_run_id or self.mlflow_run_id
+
+        if resumed_run_id is None:
+            logger.warning("mlflow_model_artifact_skipped", reason="run_start_failed")
+            return
+
+        tracker.log_artifact(save_path, artifact_path="model")
+        tracker.log_dict(checkpoint["config"], filename="model/training_config.json")
+        if metadata:
+            tracker.log_dict(metadata, filename="model/metadata.json")
+        tracker.end()
 
 
 def load_model_checkpoint(checkpoint_path: str | Path, device: str = "cpu") -> SignTransformer:

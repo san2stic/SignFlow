@@ -24,7 +24,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 from torch.utils.data import DataLoader
 
-from app.config import get_settings
+from app.config import Settings, get_settings
 from app.database import SessionLocal
 from app.ml.augmentation import augment_dataset
 from app.ml.dataset import LandmarkDataset, SignSample, load_landmarks_from_file
@@ -73,6 +73,7 @@ class TrainingService:
         model_path: Path,
         signflow_version: str,
         training_session_id: str,
+        mlflow_run_id: str | None,
         local_model_version_id: str,
         parent_version: str | None,
     ) -> dict[str, object]:
@@ -92,7 +93,7 @@ class TrainingService:
         result = registry.register_model(
             model_path=str(model_path),
             version_name=signflow_version,
-            run_id=training_session_id,
+            run_id=mlflow_run_id,
             tags=tags,
         )
         if (
@@ -106,6 +107,24 @@ class TrainingService:
             )
             result["staging_promotion"] = staging
         return result
+
+    @staticmethod
+    def _resolve_models_dir(settings: Settings) -> Path:
+        """Return a writable model directory, with a local fallback for native dev runs."""
+        configured_dir = Path(settings.model_dir).expanduser()
+        try:
+            configured_dir.mkdir(parents=True, exist_ok=True)
+            return configured_dir
+        except OSError as exc:
+            fallback_dir = Path(__file__).resolve().parents[2] / "data" / "models"
+            fallback_dir.mkdir(parents=True, exist_ok=True)
+            logger.warning(
+                "model_dir_fallback_applied",
+                configured_model_dir=str(configured_dir),
+                fallback_model_dir=str(fallback_dir),
+                error=str(exc),
+            )
+            return fallback_dir
 
     @staticmethod
     def _resolve_device() -> str:
@@ -2487,8 +2506,7 @@ class TrainingService:
             try:
                 # Save model checkpoint
                 settings = get_settings()
-                models_dir = Path(settings.model_dir)
-                models_dir.mkdir(parents=True, exist_ok=True)
+                models_dir = self._resolve_models_dir(settings)
 
                 # Create version
                 existing = db.scalars(select(ModelVersion).order_by(ModelVersion.created_at.asc())).all()
@@ -2687,6 +2705,7 @@ class TrainingService:
                     model_path=model_file,
                     signflow_version=version,
                     training_session_id=session.id,
+                    mlflow_run_id=trainer.mlflow_run_id,
                     local_model_version_id=model_version.id,
                     parent_version=parent_version,
                 )
