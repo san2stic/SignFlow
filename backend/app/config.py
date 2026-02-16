@@ -20,6 +20,13 @@ class Settings(BaseSettings):
 
     database_url: str = "sqlite:///./data/signflow.db"
     redis_url: str = "redis://localhost:6379/0"
+    search_backend: Literal["sql", "elasticsearch"] = "sql"
+    elasticsearch_url: str = Field(default="http://localhost:9200")
+    elasticsearch_index: str = Field(default="signflow-signs")
+    elasticsearch_timeout_ms: int = Field(default=2000, ge=100, le=60000)
+    elasticsearch_reindex_on_startup: bool = False
+    elasticsearch_fail_open: bool = True
+    elasticsearch_verify_certs: bool = False
 
     model_dir: str = "/app/data/models"
     video_dir: str = "/app/data/videos"

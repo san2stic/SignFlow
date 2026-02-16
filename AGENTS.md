@@ -75,6 +75,7 @@ Backend:
 - SQLAlchemy + Alembic
 - PostgreSQL (Docker default), SQLite supported
 - Redis + Celery for async training
+- Optional Elasticsearch for search indexing/query relevance
 - PyTorch + NumPy + scikit-learn
 - MediaPipe (backend processing path exists)
 - Optional TorchServe and ONNX runtime
@@ -107,6 +108,7 @@ Infra:
   - imports models
   - `Base.metadata.create_all(...)`
   - runtime-safe schema patches for SQLite compatibility
+  - optional Elasticsearch index bootstrap
   - preloads inference pipeline
 
 ### 5.2 Data models
@@ -176,6 +178,9 @@ Dictionary (`/dictionary`):
 - `GET /dictionary/search`
 - `POST /dictionary/export`
 - `POST /dictionary/import`
+
+Search admin (`/search`):
+- `POST /search/reindex`
 
 Stats (`/stats`):
 - `GET /stats/overview`
@@ -293,6 +298,8 @@ Primary env file at repo root: `.env` (template: `.env.example`).
 
 Key backend vars:
 - `ENV`, `DATABASE_URL`, `REDIS_URL`
+- search backend: `SEARCH_BACKEND`, `ELASTICSEARCH_URL`, `ELASTICSEARCH_INDEX`, `ELASTICSEARCH_TIMEOUT_MS`
+- search lifecycle/resilience: `ELASTICSEARCH_REINDEX_ON_STARTUP`, `ELASTICSEARCH_FAIL_OPEN`, `ELASTICSEARCH_VERIFY_CERTS`
 - `MODEL_DIR`, `VIDEO_DIR`, `EXPORT_DIR`
 - `CORS_ORIGINS`, `TRUSTED_HOSTS`, `ENABLE_DOCS`
 - rate/WS limits: `RATE_LIMIT_PER_MINUTE`, `WRITE_RATE_LIMIT_PER_MINUTE`, `WS_MESSAGES_PER_MINUTE`, `WS_MAX_CONNECTIONS_PER_IP`
@@ -329,6 +336,7 @@ Services:
 - Swagger (if enabled): `http://localhost:8000/docs`
 - PostgreSQL: `localhost:5432`
 - Redis: `localhost:6379`
+- Elasticsearch: `http://localhost:9200`
 - MLflow: `http://localhost:5001`
 - TorchServe: `http://localhost:8080` (inference), `8081` (management), `8082` (metrics)
 

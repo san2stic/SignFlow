@@ -1,5 +1,5 @@
-const STATIC_CACHE = "signflow-static-v2";
-const DICTIONARY_CACHE = "signflow-dictionary-v2";
+const STATIC_CACHE = "signflow-static-v3";
+const DICTIONARY_CACHE = "signflow-dictionary-v3";
 const STATIC_ASSETS = ["/", "/index.html", "/manifest.json", "/icons/icon-192.svg", "/icons/icon-512.svg"];
 
 self.addEventListener("install", (event) => {

@@ -8,9 +8,12 @@ from uuid import uuid4
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
+from app.config import get_settings
 from app.database import SessionLocal
 from app.main import app
 from app.models.sign import Sign
+from app.services import sign_service as sign_service_module
+from app.services.search_service import SearchBackendUnavailable
 
 
 def test_sign_crud_smoke() -> None:
@@ -102,3 +105,121 @@ def test_get_sign_backlinks_returns_referencing_signs() -> None:
         if target:
             db.delete(target)
         db.commit()
+
+
+def test_sign_search_uses_elasticsearch_result_order(monkeypatch) -> None:
+    """When ES backend is active, API should preserve ES hit order."""
+    settings = get_settings()
+    monkeypatch.setattr(settings, "search_backend", "elasticsearch")
+    monkeypatch.setattr(settings, "elasticsearch_fail_open", True)
+    monkeypatch.setattr(sign_service_module.search_service, "index_sign", lambda *_args, **_kwargs: None)
+
+    suffix = uuid4().hex[:8]
+    with TestClient(app) as client:
+        first_res = client.post(
+            "/api/v1/signs",
+            json={
+                "name": f"Bonjour Premier {suffix}",
+                "description": "First",
+                "tags": ["demo"],
+                "variants": [],
+                "related_signs": [],
+            },
+        )
+        assert first_res.status_code == 201
+        first_id = first_res.json()["id"]
+
+        second_res = client.post(
+            "/api/v1/signs",
+            json={
+                "name": f"Bonjour Second {suffix}",
+                "description": "Second",
+                "tags": ["demo"],
+                "variants": [],
+                "related_signs": [],
+            },
+        )
+        assert second_res.status_code == 201
+        second_id = second_res.json()["id"]
+
+        monkeypatch.setattr(
+            sign_service_module.search_service,
+            "search_sign_ids",
+            lambda **_: ([second_id, first_id], 2),
+        )
+
+        response = client.get(f"/api/v1/signs?search=bonjor-{suffix}")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert [item["id"] for item in payload["items"]] == [second_id, first_id]
+    assert payload["total"] == 2
+
+
+def test_sign_search_fallbacks_to_sql_when_elasticsearch_fails(monkeypatch) -> None:
+    """Fail-open mode should fallback to SQL search when ES query fails."""
+    settings = get_settings()
+    monkeypatch.setattr(settings, "search_backend", "elasticsearch")
+    monkeypatch.setattr(settings, "elasticsearch_fail_open", True)
+    monkeypatch.setattr(sign_service_module.search_service, "index_sign", lambda *_args, **_kwargs: None)
+
+    suffix = uuid4().hex[:8]
+    with TestClient(app) as client:
+        create_res = client.post(
+            "/api/v1/signs",
+            json={
+                "name": f"Bonjour Fallback {suffix}",
+                "description": "Fallback target",
+                "tags": ["demo"],
+                "variants": [],
+                "related_signs": [],
+            },
+        )
+        assert create_res.status_code == 201
+
+        def raise_unavailable(**_):
+            raise SearchBackendUnavailable("down")
+
+        monkeypatch.setattr(sign_service_module.search_service, "search_sign_ids", raise_unavailable)
+
+        response = client.get(f"/api/v1/signs?search=Fallback {suffix}")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert any(f"Bonjour Fallback {suffix}" == item["name"] for item in payload["items"])
+
+
+def test_sign_search_typo_uses_elasticsearch_candidates(monkeypatch) -> None:
+    """Typo query should still return expected sign when ES resolves it."""
+    settings = get_settings()
+    monkeypatch.setattr(settings, "search_backend", "elasticsearch")
+    monkeypatch.setattr(settings, "elasticsearch_fail_open", True)
+    monkeypatch.setattr(sign_service_module.search_service, "index_sign", lambda *_args, **_kwargs: None)
+
+    suffix = uuid4().hex[:8]
+    with TestClient(app) as client:
+        create_res = client.post(
+            "/api/v1/signs",
+            json={
+                "name": f"Bonjour Typo {suffix}",
+                "description": "Typo target",
+                "tags": ["demo"],
+                "variants": [],
+                "related_signs": [],
+            },
+        )
+        assert create_res.status_code == 201
+        sign_id = create_res.json()["id"]
+
+        monkeypatch.setattr(
+            sign_service_module.search_service,
+            "search_sign_ids",
+            lambda **_: ([sign_id], 1),
+        )
+
+        response = client.get(f"/api/v1/signs?search=bonjor {suffix}")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["total"] == 1
+    assert payload["items"][0]["id"] == sign_id

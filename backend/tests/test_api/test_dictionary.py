@@ -13,6 +13,8 @@ from app.config import get_settings
 from app.database import SessionLocal
 from app.main import app
 from app.models.sign import Sign
+from app.services import dictionary_service as dictionary_service_module
+from app.services.search_service import SearchBackendUnavailable
 
 
 def test_dictionary_markdown_export_produces_markdown_bundle(monkeypatch, tmp_path) -> None:
@@ -79,3 +81,64 @@ def test_dictionary_import_accepts_obsidian_markdown() -> None:
     with SessionLocal() as db:
         imported = db.scalar(select(Sign).where(Sign.slug.like(f"imported-{suffix}%")))
         assert imported is not None
+
+
+def test_dictionary_search_uses_elasticsearch_when_enabled(monkeypatch) -> None:
+    """Dictionary search should use ES payload when backend is enabled."""
+    settings = get_settings()
+    monkeypatch.setattr(settings, "search_backend", "elasticsearch")
+    monkeypatch.setattr(settings, "elasticsearch_fail_open", True)
+
+    expected = [
+        {
+            "id": "a1",
+            "name": "Bonjour",
+            "slug": "bonjour",
+            "category": "lsfb-v1",
+            "tags": ["lsfb", "greeting"],
+        }
+    ]
+    monkeypatch.setattr(
+        dictionary_service_module.search_service,
+        "search_dictionary",
+        lambda **_: expected,
+    )
+
+    with TestClient(app) as client:
+        response = client.get("/api/v1/dictionary/search?q=bonjor&fields=name")
+
+    assert response.status_code == 200
+    assert response.json() == expected
+
+
+def test_dictionary_search_fallbacks_to_sql_when_elasticsearch_unavailable(monkeypatch) -> None:
+    """Fail-open mode should fallback to SQL when ES dictionary search fails."""
+    settings = get_settings()
+    monkeypatch.setattr(settings, "search_backend", "elasticsearch")
+    monkeypatch.setattr(settings, "elasticsearch_fail_open", True)
+
+    def raise_unavailable(**_):
+        raise SearchBackendUnavailable("down")
+
+    monkeypatch.setattr(dictionary_service_module.search_service, "search_dictionary", raise_unavailable)
+
+    suffix = uuid4().hex[:8]
+    with SessionLocal() as db:
+        sign = Sign(
+            name=f"Dico Fallback {suffix}",
+            slug=f"dico-fallback-{suffix}",
+            description="Fallback dictionary result",
+            category="demo",
+            tags=["demo"],
+            variants=[],
+            notes="",
+        )
+        db.add(sign)
+        db.commit()
+
+    with TestClient(app) as client:
+        response = client.get(f"/api/v1/dictionary/search?q=Fallback {suffix}&fields=all")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert any(item["slug"] == f"dico-fallback-{suffix}" for item in payload)

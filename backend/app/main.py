@@ -16,7 +16,7 @@ from sqlalchemy import inspect, text
 
 from app.api.router import api_router
 from app.config import get_settings
-from app.database import Base, engine
+from app.database import Base, SessionLocal, engine
 from app.ml.metrics import get_metrics_collector
 
 settings = get_settings()
@@ -120,6 +120,26 @@ def on_startup() -> None:
     Base.metadata.create_all(bind=engine)
     ensure_runtime_schema()
     logger.info("app.startup", env=settings.env)
+
+    if settings.search_backend == "elasticsearch":
+        try:
+            from app.services.search_service import SearchBackendUnavailable, search_service
+
+            search_service.ensure_available()
+            logger.info("search_backend_ready", backend="elasticsearch", index=search_service.index_name)
+
+            if settings.elasticsearch_reindex_on_startup:
+                with SessionLocal() as db:
+                    result = search_service.reindex_all(db)
+                logger.info(
+                    "search_reindex_on_startup_complete",
+                    indexed=result["indexed"],
+                    failed=result["failed"],
+                    duration_ms=result["duration_ms"],
+                    index=result["index"],
+                )
+        except SearchBackendUnavailable as exc:
+            logger.warning("search_backend_unavailable", error=str(exc))
 
     # Pre-load inference pipeline with active model
     try:

@@ -10,6 +10,13 @@ services:
     environment:
       - DATABASE_URL=postgresql+psycopg://${POSTGRES_USER:-signflow}:${POSTGRES_PASSWORD:-signflow}@db:5432/${POSTGRES_DB:-signflow}
       - REDIS_URL=redis://:${REDIS_PASSWORD:-signflow-dev}@redis:6379/0
+      - SEARCH_BACKEND=elasticsearch
+      - ELASTICSEARCH_URL=http://elasticsearch:9200
+      - ELASTICSEARCH_INDEX=signflow-signs
+      - ELASTICSEARCH_TIMEOUT_MS=2000
+      - ELASTICSEARCH_REINDEX_ON_STARTUP=false
+      - ELASTICSEARCH_FAIL_OPEN=true
+      - ELASTICSEARCH_VERIFY_CERTS=false
       - MODEL_DIR=/app/data/models
       - VIDEO_DIR=/app/data/videos
       - EXPORT_DIR=/app/data/exports
@@ -32,6 +39,7 @@ services:
     depends_on:
       - db
       - redis
+      - elasticsearch
 
   frontend:
     build: ./frontend
@@ -61,6 +69,18 @@ services:
     ports:
       - "6379:6379"
 
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.15.3
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - xpack.security.http.ssl.enabled=false
+      - ES_JAVA_OPTS=-Xms512m -Xmx512m
+    ports:
+      - "9200:9200"
+    volumes:
+      - esdata:/usr/share/elasticsearch/data
+
   celery_worker:
     build: ./backend
     command: celery -A app.celery_app worker -l info -Q training
@@ -70,6 +90,13 @@ services:
     environment:
       - DATABASE_URL=postgresql+psycopg://${POSTGRES_USER:-signflow}:${POSTGRES_PASSWORD:-signflow}@db:5432/${POSTGRES_DB:-signflow}
       - REDIS_URL=redis://:${REDIS_PASSWORD:-signflow-dev}@redis:6379/0
+      - SEARCH_BACKEND=elasticsearch
+      - ELASTICSEARCH_URL=http://elasticsearch:9200
+      - ELASTICSEARCH_INDEX=signflow-signs
+      - ELASTICSEARCH_TIMEOUT_MS=2000
+      - ELASTICSEARCH_REINDEX_ON_STARTUP=false
+      - ELASTICSEARCH_FAIL_OPEN=true
+      - ELASTICSEARCH_VERIFY_CERTS=false
       - MODEL_DIR=/app/data/models
       - VIDEO_DIR=/app/data/videos
       - EXPORT_DIR=/app/data/exports
@@ -77,6 +104,7 @@ services:
     depends_on:
       - redis
       - db
+      - elasticsearch
 
   mlflow:
     image: python:3.11-slim
@@ -125,4 +153,5 @@ services:
 
 volumes:
   pgdata:
+  esdata:
   frontend_node_modules:

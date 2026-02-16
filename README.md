@@ -38,6 +38,7 @@ Frontend note:
 - SQLAlchemy + Alembic
 - PostgreSQL default in Docker (SQLite also supported)
 - Redis + Celery for async training
+- Elasticsearch for sign/dictionary search (optional, enabled in Docker stacks)
 - PyTorch + MediaPipe + NumPy + scikit-learn
 - Optional TorchServe + ONNX Runtime + MLflow registry
 
@@ -60,6 +61,7 @@ Endpoints:
 - Frontend: `http://localhost:3000`
 - Backend API: `http://localhost:8000`
 - Swagger docs: `http://localhost:8000/docs`
+- Elasticsearch: `http://localhost:9200`
 - MLflow: `http://localhost:5001`
 - TorchServe ping: `http://localhost:8080/ping`
 
@@ -104,6 +106,7 @@ Base prefix: `/api/v1`
 - Training: `/training/sessions*` + `WS /training/sessions/{id}/live`
 - Models: `/models`, `/models/active`, `/models/{id}/activate`, `/models/{id}/export`
 - Dictionary: `/dictionary/graph`, `/dictionary/search`, `/dictionary/export`, `/dictionary/import`
+- Search admin: `/search/reindex`
 - Stats: `/stats/overview`, `/stats/accuracy-history`, `/stats/signs-per-category`
 
 Health and metrics:
@@ -116,6 +119,8 @@ Primary template: `.env.example`
 
 Important variables:
 - Runtime/data: `ENV`, `DATABASE_URL`, `REDIS_URL`, `MODEL_DIR`, `VIDEO_DIR`, `EXPORT_DIR`
+- Search: `SEARCH_BACKEND`, `ELASTICSEARCH_URL`, `ELASTICSEARCH_INDEX`, `ELASTICSEARCH_TIMEOUT_MS`
+- Search resilience/bootstrap: `ELASTICSEARCH_REINDEX_ON_STARTUP`, `ELASTICSEARCH_FAIL_OPEN`, `ELASTICSEARCH_VERIFY_CERTS`
 - API controls: `CORS_ORIGINS`, `TRUSTED_HOSTS`, `ENABLE_DOCS`
 - Limits: `MAX_REQUEST_MB`, `RATE_LIMIT_PER_MINUTE`, `WRITE_RATE_LIMIT_PER_MINUTE`
 - Translation tuning: `TRANSLATE_*`

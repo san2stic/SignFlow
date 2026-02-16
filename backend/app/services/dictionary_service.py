@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import tempfile
@@ -15,13 +16,16 @@ from slugify import slugify
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session, selectinload
 
-from app.config import Settings
+from app.config import Settings, get_settings
 from app.models.sign import Sign
+from app.services.search_service import SearchBackendUnavailable, search_service
 from app.utils.export import export_dictionary_json, export_dictionary_markdown, export_dictionary_obsidian
 from app.utils.markdown import extract_wikilinks
 
 _HEADING_RE = re.compile(r"(?m)^#\s+(.+?)\s*$")
 _SECTION_TEMPLATE = r"(?ms)^##\s+{title}\s*$\n(.*?)(?=^##\s+|\Z)"
+logger = logging.getLogger(__name__)
+settings = get_settings()
 
 
 class DictionaryService:
@@ -65,7 +69,22 @@ class DictionaryService:
 
     def search(self, db: Session, q: str, fields: str) -> list[dict]:
         """Search signs across selected textual fields."""
-        ilike = f"%{q}%"
+        normalized_q = q.strip()
+        if not normalized_q:
+            return []
+
+        if settings.search_backend == "elasticsearch":
+            try:
+                return search_service.search_dictionary(query=normalized_q, fields=fields, limit=100)
+            except SearchBackendUnavailable as exc:
+                if not settings.elasticsearch_fail_open:
+                    raise HTTPException(
+                        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                        detail="Search backend unavailable",
+                    ) from exc
+                logger.warning("elasticsearch_dictionary_search_failed_fallback_to_sql", extra={"error": str(exc)})
+
+        ilike = f"%{normalized_q}%"
         query = select(Sign)
 
         if fields == "name":
@@ -73,7 +92,7 @@ class DictionaryService:
         elif fields == "description":
             query = query.where(Sign.description.ilike(ilike))
         elif fields == "tags":
-            query = query.where(Sign.tags.contains([q]))
+            query = query.where(Sign.tags.contains([normalized_q]))
         else:
             query = query.where(or_(Sign.name.ilike(ilike), Sign.description.ilike(ilike), Sign.notes.ilike(ilike)))
 
@@ -277,6 +296,7 @@ class DictionaryService:
                     target.related_signs.append(source)
 
         db.commit()
+        self._sync_imported_signs_search_index(db, list(imported_by_id.keys()))
         return {
             "imported_signs": imported_signs,
             "imported_notes": imported_notes,
@@ -403,3 +423,26 @@ class DictionaryService:
             candidate = f"{initial_slug}-{suffix}"
             suffix += 1
         return candidate
+
+    def _sync_imported_signs_search_index(self, db: Session, sign_ids: list[str]) -> None:
+        """Bulk-sync imported signs into Elasticsearch when enabled."""
+        if settings.search_backend != "elasticsearch" or not sign_ids:
+            return
+
+        signs = db.scalars(select(Sign).where(Sign.id.in_(sign_ids))).all()
+        if not signs:
+            return
+
+        try:
+            search_service.bulk_upsert_signs(signs)
+        except SearchBackendUnavailable as exc:
+            if settings.elasticsearch_fail_open:
+                logger.warning(
+                    "elasticsearch_dictionary_import_sync_failed",
+                    extra={"imported_count": len(signs), "error": str(exc)},
+                )
+                return
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Search backend unavailable",
+            ) from exc

@@ -1,4 +1,23 @@
-const API_BASE = import.meta.env.VITE_API_URL || "http://localhost:8000/api/v1";
+const RAW_API_URL = (import.meta.env.VITE_API_URL as string | undefined)?.trim();
+
+function trimTrailingSlashes(value: string): string {
+  return value.replace(/\/+$/, "");
+}
+
+function resolveApiBase(value?: string): string {
+  if (!value) {
+    return "/api/v1";
+  }
+
+  const trimmed = trimTrailingSlashes(value);
+  if (trimmed.endsWith("/api/v1")) {
+    return trimmed;
+  }
+
+  return `${trimmed}/api/v1`;
+}
+
+const API_BASE = resolveApiBase(RAW_API_URL);
 
 interface LoginCredentials {
   email: string;
