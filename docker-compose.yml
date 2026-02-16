@@ -94,7 +94,7 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile.torchserve
-    platform: linux/arm64  # Changez en linux/amd64 pour x86_64
+    # platform: auto-detected (supprimé pour compatibilité multi-arch)
     container_name: signflow_torchserve
     ports:
       - "8080:8080"  # Inference API
