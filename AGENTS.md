@@ -230,7 +230,7 @@ Implemented controls:
 
 Current security note:
 - Most non-auth business endpoints are not currently JWT-protected.
-- In production, Caddy basic auth can protect the full surface.
+- Production ingress relies on Caddy TLS + headers; use JWT/auth hardening for API surface protection.
 
 ## 6. Frontend Architecture
 
@@ -400,14 +400,13 @@ Test suites include API behavior, ML modules, service logic, and UI components.
 
 Production-like compose uses Caddy (`docker-compose.prod.yml` + `Caddyfile`):
 - reverse proxy frontend + backend under one origin
-- basic auth gate
 - strict security headers
 - docs disabled by default in prod (`ENABLE_DOCS=false`)
 
 Before production use:
 - set strong `JWT_SECRET_KEY`
 - set non-empty `POSTGRES_PASSWORD`, `REDIS_PASSWORD`
-- configure domain and Caddy basic auth hash
+- configure domain and review access-control strategy (JWT, network ACL, or external IdP)
 - review CORS and trusted hosts
 
 ## 12. Known Gaps / Technical Debt
@@ -427,4 +426,3 @@ When editing SignFlow:
 - Prefer explicit migration files for schema evolution; avoid relying only on runtime patches.
 - For frontend, verify route wiring and navigation links together.
 - For any change touching env vars, update both `.env.example` and documentation.
-

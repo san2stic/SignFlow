@@ -165,13 +165,12 @@ npm run build
 
 ```bash
 cp .env.example .env
-# set SIGNFLOW_DOMAIN, POSTGRES_PASSWORD, REDIS_PASSWORD, and Caddy basic-auth envs
+# set SIGNFLOW_DOMAIN, POSTGRES_PASSWORD, and REDIS_PASSWORD
 docker compose -f docker-compose.prod.yml up --build
 ```
 
 Caddy provides:
 - single-origin frontend + `/api/*` proxy
-- basic auth gate
 - security headers (HSTS, nosniff, frame deny, permissions policy)
 
 ## Known gaps
