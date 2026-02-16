@@ -141,7 +141,7 @@ services:
     image: python:3.11-slim
     command: >
       sh -c "pip install mlflow>=2.10.0 &&
-             mlflow ui --host 0.0.0.0 --port 5001 --backend-store-uri file:///mlflow/mlruns"
+             mlflow ui --host 0.0.0.0 --port 5001 --allowed-hosts '*' --backend-store-uri file:///mlflow/mlruns"
     restart: unless-stopped
     ports:
       - "5001:5001"

@@ -178,10 +178,11 @@ Caddy provides:
 - single-origin frontend + `/api/*` proxy
 - security headers (nosniff, frame deny, permissions policy)
 
-For HTTPS access over Tailnet:
+For HTTPS access over Tailnet (app/API + MLflow):
 
 ```bash
 /Applications/Tailscale.app/Contents/MacOS/Tailscale serve --https=443 --yes http://127.0.0.1:80
+/Applications/Tailscale.app/Contents/MacOS/Tailscale serve --https=5001 --yes http://127.0.0.1:5001
 ```
 
 Automation script:
