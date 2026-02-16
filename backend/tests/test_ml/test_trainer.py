@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import numpy as np
 import torch
 
+from app.ml.dataset import LandmarkDataset, SignSample
 from app.ml.feature_engineering import ENRICHED_FEATURE_DIM
 from app.ml.model import SignTransformer
 from app.ml.trainer import SignTrainer, TrainingConfig
@@ -59,3 +61,46 @@ def test_stable_inverse_frequency_weights_are_clipped_and_normalized() -> None:
     assert float(weights.min()) >= 0.3
     assert float(weights.max()) <= 3.0
     assert weights[0] <= weights[1] <= weights[2]
+
+
+def test_trainer_curriculum_progressively_expands_train_subset() -> None:
+    """Trainer should increase curriculum subset size across epochs."""
+    rng = np.random.default_rng(7)
+    samples: list[SignSample] = []
+    for label in [0, 1]:
+        for _ in range(4):
+            landmarks = rng.standard_normal((48, 225)).astype(np.float32) * (label + 1)
+            samples.append(SignSample(landmarks=landmarks, label=label))
+
+    train_dataset = LandmarkDataset(samples[:6], sequence_length=32)
+    val_dataset = LandmarkDataset(samples[6:], sequence_length=32)
+
+    model = SignTransformer(num_features=ENRICHED_FEATURE_DIM, num_classes=2)
+    config = TrainingConfig(
+        num_epochs=3,
+        batch_size=2,
+        num_workers=0,
+        device="cpu",
+        use_mlflow=False,
+        use_curriculum=True,
+        curriculum_strategy="length",
+        curriculum_start_fraction=0.5,
+        curriculum_warmup_epochs=0,
+        curriculum_min_samples=1,
+    )
+    trainer = SignTrainer(model=model, config=config)
+
+    seen_sizes: list[int] = []
+
+    def fake_train_epoch(loader):  # type: ignore[no-untyped-def]
+        seen_sizes.append(len(loader.dataset))
+        return 0.9, 0.5
+
+    trainer.train_epoch = fake_train_epoch  # type: ignore[method-assign]
+    trainer.validate = lambda _loader: (0.8, 0.5)  # type: ignore[method-assign]
+
+    metrics = trainer.fit(train_dataset, val_dataset)
+
+    assert len(metrics) == 3
+    assert seen_sizes[0] < seen_sizes[-1]
+    assert seen_sizes[-1] == len(train_dataset)

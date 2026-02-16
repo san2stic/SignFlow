@@ -45,6 +45,11 @@ class Settings(BaseSettings):
     translate_inference_num_views: int = Field(default=1, ge=1, le=8)
     translate_inference_temperature: float = Field(default=1.0, ge=0.1, le=3.0)
     translate_max_view_disagreement: float = Field(default=0.35, ge=0.01, le=1.0)
+    translate_tta_enable_mirror: bool = True
+    translate_tta_enable_temporal_jitter: bool = True
+    translate_tta_enable_spatial_noise: bool = True
+    translate_tta_temporal_jitter_ratio: float = Field(default=0.05, ge=0.0, le=0.3)
+    translate_tta_spatial_noise_std: float = Field(default=0.005, ge=0.0, le=0.1)
     use_torchserve: bool = False
     torchserve_url: str = Field(default="http://torchserve:8080")
     torchserve_timeout_ms: int = Field(default=2000, ge=100, le=30000)

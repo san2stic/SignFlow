@@ -38,9 +38,15 @@ class TrainingConfig(BaseModel):
     swa_start_ratio: float = Field(default=0.75, ge=0.1, le=0.95)
     swa_lr: float | None = Field(default=None, gt=0, le=1)
     use_distillation: bool = False
-    distillation_alpha: float = Field(default=0.25, ge=0.0, le=1.0)
-    distillation_temperature: float = Field(default=2.0, ge=0.1, le=20.0)
+    distillation_alpha: float = Field(default=0.5, ge=0.0, le=1.0)
+    distillation_temperature: float = Field(default=4.0, ge=0.1, le=20.0)
     teacher_model_path: str | None = None
+    use_curriculum: bool = False
+    curriculum_strategy: Literal["length", "confidence"] = "length"
+    curriculum_start_fraction: float = Field(default=0.4, ge=0.1, le=1.0)
+    curriculum_warmup_epochs: int = Field(default=2, ge=0, le=100)
+    curriculum_min_samples: int = Field(default=64, ge=1, le=500000)
+    curriculum_confidence_momentum: float = Field(default=0.8, ge=0.0, le=0.999)
     freeze_until_layer: int = Field(default=2, ge=0, le=8)
     min_deploy_accuracy: float = Field(default=0.85, ge=0.0, le=1.0)
     quality_min_detection_rate: float = Field(default=0.8, ge=0.0, le=1.0)

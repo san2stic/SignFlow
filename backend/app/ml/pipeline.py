@@ -14,6 +14,7 @@ import torch
 
 from app.ml.features import FrameLandmarks, normalize_landmarks
 from app.ml.model import SignTransformer
+from app.ml.tta import TTAConfig, TTAGenerator
 from app.ml.trainer import load_model_checkpoint
 
 logger = structlog.get_logger(__name__)
@@ -71,6 +72,11 @@ class SignFlowInferencePipeline:
         inference_num_views: int = 1,
         inference_temperature: float = 1.0,
         max_view_disagreement: float = 0.35,
+        tta_enable_mirror: bool = True,
+        tta_enable_temporal_jitter: bool = True,
+        tta_enable_spatial_noise: bool = True,
+        tta_temporal_jitter_ratio: float = 0.05,
+        tta_spatial_noise_std: float = 0.005,
         calibration_temperature: float | None = None,
         class_thresholds: dict[str, float] | None = None,
     ) -> None:
@@ -95,6 +101,11 @@ class SignFlowInferencePipeline:
             inference_num_views: Number of temporal views for test-time ensembling.
             inference_temperature: Softmax temperature used for calibrated probabilities.
             max_view_disagreement: Max tolerated view disagreement before confidence penalty.
+            tta_enable_mirror: Whether to include left/right mirrored views.
+            tta_enable_temporal_jitter: Whether to include temporal speed perturbations.
+            tta_enable_spatial_noise: Whether to include spatial landmark noise.
+            tta_temporal_jitter_ratio: Max relative speed perturbation for temporal jitter.
+            tta_spatial_noise_std: Gaussian std for spatial perturbation.
         """
         self.seq_len = seq_len
         self.model_version = str(model_version or "unknown")
@@ -107,6 +118,21 @@ class SignFlowInferencePipeline:
         self.inference_num_views = max(1, int(inference_num_views))
         self.inference_temperature = float(max(0.1, inference_temperature))
         self.max_view_disagreement = float(max(1e-6, max_view_disagreement))
+        self.tta_enable_mirror = bool(tta_enable_mirror)
+        self.tta_enable_temporal_jitter = bool(tta_enable_temporal_jitter)
+        self.tta_enable_spatial_noise = bool(tta_enable_spatial_noise)
+        self.tta_temporal_jitter_ratio = float(np.clip(tta_temporal_jitter_ratio, 0.0, 0.3))
+        self.tta_spatial_noise_std = float(max(0.0, tta_spatial_noise_std))
+        self._tta_generator = TTAGenerator(
+            TTAConfig(
+                num_views=self.inference_num_views,
+                enable_mirror=self.tta_enable_mirror,
+                enable_temporal_jitter=self.tta_enable_temporal_jitter,
+                enable_spatial_noise=self.tta_enable_spatial_noise,
+                temporal_jitter_ratio=self.tta_temporal_jitter_ratio,
+                spatial_noise_std=self.tta_spatial_noise_std,
+            )
+        )
         self.calibration_temperature = (
             float(max(0.1, calibration_temperature))
             if calibration_temperature is not None
@@ -304,6 +330,11 @@ class SignFlowInferencePipeline:
             inference_num_views=self.inference_num_views,
             inference_temperature=self.inference_temperature,
             max_view_disagreement=self.max_view_disagreement,
+            tta_enable_mirror=self.tta_enable_mirror,
+            tta_enable_temporal_jitter=self.tta_enable_temporal_jitter,
+            tta_enable_spatial_noise=self.tta_enable_spatial_noise,
+            tta_temporal_jitter_ratio=self.tta_temporal_jitter_ratio,
+            tta_spatial_noise_std=self.tta_spatial_noise_std,
             calibration_temperature=self.calibration_temperature,
             class_thresholds=dict(self.class_thresholds),
         )
@@ -817,31 +848,9 @@ class SignFlowInferencePipeline:
 
     def _build_inference_views(self, window: np.ndarray) -> list[np.ndarray]:
         """Create lightweight temporal views for test-time ensembling."""
-        views = [window.astype(np.float32, copy=False)]
-        if self.inference_num_views <= 1 or window.ndim != 2 or window.shape[0] < 8:
-            return views
-
-        shift = max(1, window.shape[0] // 16)
-        if len(views) < self.inference_num_views:
-            views.append(np.roll(window, shift=shift, axis=0).astype(np.float32, copy=False))
-        if len(views) < self.inference_num_views:
-            views.append(np.roll(window, shift=-shift, axis=0).astype(np.float32, copy=False))
-
-        if len(views) < self.inference_num_views:
-            from app.ml.dataset import temporal_resample
-
-            margin = max(1, window.shape[0] // 8)
-            if window.shape[0] > (2 * margin + 2):
-                cropped = window[margin:-margin]
-            else:
-                cropped = window
-            cropped = temporal_resample(cropped, target_len=window.shape[0])
-            views.append(cropped.astype(np.float32, copy=False))
-
-        while len(views) < self.inference_num_views:
-            views.append(window.astype(np.float32, copy=False))
-
-        return views[: self.inference_num_views]
+        if window.ndim != 2:
+            return [window.astype(np.float32, copy=False)]
+        return self._tta_generator.generate(window)
 
     def _smooth(self) -> tuple[str, float]:
         """Apply majority-vote smoothing with confidence stabilization."""

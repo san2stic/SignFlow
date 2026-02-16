@@ -16,8 +16,10 @@ import torch.nn as nn
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import LambdaLR
 from torch.optim.swa_utils import AveragedModel, update_bn
-from torch.utils.data import DataLoader, WeightedRandomSampler
+from torch.utils.data import DataLoader, Dataset, Subset, WeightedRandomSampler
 
+from app.ml.curriculum import CurriculumSampler
+from app.ml.distillation import DistillationTrainer
 from app.ml.dataset import LandmarkDataset
 from app.ml.model import SignTransformer
 from app.ml.tracking import create_default_tracker
@@ -67,8 +69,14 @@ class TrainingConfig:
     swa_lr: float | None = None
 
     use_distillation: bool = False
-    distillation_alpha: float = 0.25
-    distillation_temperature: float = 2.0
+    distillation_alpha: float = 0.5
+    distillation_temperature: float = 4.0
+    use_curriculum: bool = False
+    curriculum_strategy: str = "length"  # "length" | "confidence"
+    curriculum_start_fraction: float = 0.4
+    curriculum_warmup_epochs: int = 2
+    curriculum_min_samples: int = 64
+    curriculum_confidence_momentum: float = 0.8
 
     # Stable imbalance controls.
     class_weight_power: float = 0.5
@@ -172,6 +180,10 @@ class SignTrainer:
         self.progress_callback = progress_callback
         self.stop_signal = stop_signal
         self.teacher_model = teacher_model
+        self.distillation_helper = DistillationTrainer(
+            temperature=float(self.config.distillation_temperature),
+            alpha=float(self.config.distillation_alpha),
+        )
 
         # Move model to device
         self.device = torch.device(config.device)
@@ -277,9 +289,29 @@ class SignTrainer:
         return lr_lambda
 
     @staticmethod
-    def _class_distribution(dataset: LandmarkDataset) -> tuple[np.ndarray, np.ndarray]:
-        """Return class ids and counts from processed dataset."""
-        labels = [int(label) for _sequence, label in dataset.processed_samples]
+    def _dataset_labels(dataset: Dataset) -> list[int]:
+        """Extract labels from LandmarkDataset or a torch Subset wrapping it."""
+        if isinstance(dataset, LandmarkDataset):
+            return [int(label) for _sequence, label in dataset.processed_samples]
+
+        if isinstance(dataset, Subset):
+            base = dataset.dataset
+            if isinstance(base, LandmarkDataset):
+                return [
+                    int(base.processed_samples[int(index)][1])
+                    for index in dataset.indices
+                ]
+
+        labels: list[int] = []
+        for sample_index in range(len(dataset)):
+            _sequence, label = dataset[sample_index]
+            labels.append(int(label))
+        return labels
+
+    @classmethod
+    def _class_distribution(cls, dataset: Dataset) -> tuple[np.ndarray, np.ndarray]:
+        """Return class ids and counts from any compatible torch dataset."""
+        labels = cls._dataset_labels(dataset)
         if not labels:
             return np.array([], dtype=np.int64), np.array([], dtype=np.int64)
         return np.unique(np.array(labels, dtype=np.int64), return_counts=True)
@@ -302,7 +334,7 @@ class SignTrainer:
         inv = np.clip(inv, float(min_weight), float(max_weight)).astype(np.float32)
         return inv
 
-    def _configure_criterion(self, train_dataset: LandmarkDataset) -> None:
+    def _configure_criterion(self, train_dataset: Dataset) -> None:
         """Configure criterion using class weights from train set if requested."""
         class_weights_tensor: torch.Tensor | None = None
         class_ids, counts = self._class_distribution(train_dataset)
@@ -333,7 +365,7 @@ class SignTrainer:
                 label_smoothing=self.config.label_smoothing,
             )
 
-    def _build_train_loader(self, train_dataset: LandmarkDataset) -> DataLoader:
+    def _build_train_loader(self, train_dataset: Dataset) -> DataLoader:
         """Build training dataloader with optional class-balanced sampler."""
         sampler = None
         shuffle = True
@@ -351,10 +383,8 @@ class SignTrainer:
                     int(class_id): float(weight)
                     for class_id, weight in zip(class_ids.tolist(), inv.tolist())
                 }
-                sample_weights = [
-                    class_to_weight.get(int(label), 1.0)
-                    for _sequence, label in train_dataset.processed_samples
-                ]
+                labels = self._dataset_labels(train_dataset)
+                sample_weights = [class_to_weight.get(int(label), 1.0) for label in labels]
                 sampler = WeightedRandomSampler(
                     weights=torch.tensor(sample_weights, dtype=torch.double),
                     num_samples=len(sample_weights),
@@ -403,11 +433,10 @@ class SignTrainer:
         teacher_logits: torch.Tensor,
     ) -> torch.Tensor:
         """Compute KL distillation loss from teacher to student."""
-        temperature = max(1e-3, float(self.config.distillation_temperature))
-        student_log_probs = torch.nn.functional.log_softmax(student_logits / temperature, dim=1)
-        teacher_probs = torch.nn.functional.softmax(teacher_logits / temperature, dim=1)
-        kl = torch.nn.functional.kl_div(student_log_probs, teacher_probs, reduction="batchmean")
-        return kl * (temperature ** 2)
+        return self.distillation_helper.distillation_loss(
+            student_logits=student_logits,
+            teacher_logits=teacher_logits,
+        )
 
     def _update_ema(self) -> None:
         """Update exponential moving average of trainable parameters."""
@@ -604,9 +633,11 @@ class SignTrainer:
                 if self.config.use_distillation and self.teacher_model is not None:
                     with torch.no_grad():
                         teacher_logits = self.teacher_model(distillation_inputs)
-                    alpha = float(np.clip(self.config.distillation_alpha, 0.0, 1.0))
-                    distillation_loss = self._compute_distillation_loss(logits, teacher_logits)
-                    loss = ((1.0 - alpha) * loss) + (alpha * distillation_loss)
+                    loss = self.distillation_helper.combined_loss(
+                        hard_loss=loss,
+                        student_logits=logits,
+                        teacher_logits=teacher_logits,
+                    )
 
             loss_value = float(loss.item())
             scaled_loss = loss / self.accumulation_steps
@@ -684,6 +715,38 @@ class SignTrainer:
 
         return avg_loss, accuracy
 
+    def _estimate_curriculum_confidence(self, dataset: LandmarkDataset) -> dict[int, float]:
+        """Estimate per-sample true-label confidence for confidence-based curriculum."""
+        if len(dataset) == 0:
+            return {}
+
+        loader = DataLoader(
+            dataset,
+            batch_size=self.config.batch_size,
+            shuffle=False,
+            num_workers=self.config.num_workers,
+            pin_memory=self.device.type == "cuda",
+            persistent_workers=self.config.num_workers > 0,
+        )
+        confidence_by_index: dict[int, float] = {}
+        offset = 0
+
+        self.model.eval()
+        with self._swap_to_ema_weights(), torch.no_grad():
+            for landmarks, labels in loader:
+                landmarks = landmarks.to(self.device)
+                labels = labels.to(self.device).long()
+                with self._autocast_context():
+                    logits = self.model(landmarks)
+                    probs = torch.softmax(logits, dim=1)
+                batch_confidence = probs.gather(1, labels.unsqueeze(1)).squeeze(1)
+                values = batch_confidence.detach().cpu().numpy()
+                for value in values.tolist():
+                    confidence_by_index[offset] = float(np.clip(value, 0.0, 1.0))
+                    offset += 1
+
+        return confidence_by_index
+
     def fit(
         self,
         train_dataset: LandmarkDataset,
@@ -713,7 +776,7 @@ class SignTrainer:
         self._configure_criterion(train_dataset)
 
         # Create dataloaders
-        train_loader = self._build_train_loader(train_dataset)
+        full_train_loader = self._build_train_loader(train_dataset)
         val_loader = DataLoader(
             val_dataset,
             batch_size=self.config.batch_size,
@@ -722,6 +785,22 @@ class SignTrainer:
             pin_memory=self.device.type == "cuda",
             persistent_workers=self.config.num_workers > 0,
         )
+        curriculum_sampler: CurriculumSampler | None = None
+        if self.config.use_curriculum and len(train_dataset) > 0:
+            curriculum_sampler = CurriculumSampler(
+                strategy=self.config.curriculum_strategy,
+                start_fraction=self.config.curriculum_start_fraction,
+                warmup_epochs=self.config.curriculum_warmup_epochs,
+                min_samples=min(len(train_dataset), self.config.curriculum_min_samples),
+                confidence_momentum=self.config.curriculum_confidence_momentum,
+            )
+            logger.info(
+                "curriculum_enabled",
+                strategy=self.config.curriculum_strategy,
+                start_fraction=self.config.curriculum_start_fraction,
+                warmup_epochs=self.config.curriculum_warmup_epochs,
+                min_samples=min(len(train_dataset), self.config.curriculum_min_samples),
+            )
 
         # Start MLflow run and log parameters
         with mlflow_tracker.start_run(
@@ -745,6 +824,14 @@ class SignTrainer:
                 "use_amp": self.config.use_amp,
                 "use_swa": self.config.use_swa,
                 "use_focal_loss": self.config.use_focal_loss,
+                "use_distillation": self.config.use_distillation,
+                "distillation_alpha": self.config.distillation_alpha,
+                "distillation_temperature": self.config.distillation_temperature,
+                "use_curriculum": self.config.use_curriculum,
+                "curriculum_strategy": self.config.curriculum_strategy,
+                "curriculum_start_fraction": self.config.curriculum_start_fraction,
+                "curriculum_warmup_epochs": self.config.curriculum_warmup_epochs,
+                "curriculum_min_samples": self.config.curriculum_min_samples,
                 "d_model": self.model.d_model,
                 "num_layers": self.model.num_layers,
                 "nhead": self.model.nhead,
@@ -757,14 +844,42 @@ class SignTrainer:
             # Training loop
             for epoch in range(self.config.num_epochs):
                 epoch_start = time.time()
+                curriculum_fraction = 1.0
+                curriculum_selected = len(train_dataset)
+                epoch_train_loader = full_train_loader
 
                 # Check stop signal before starting epoch
                 if self.stop_signal and self.stop_signal():
                     logger.info("training_stopped_before_epoch", epoch=epoch)
                     break
 
+                if curriculum_sampler is not None:
+                    if curriculum_sampler.strategy == "confidence":
+                        confidence_by_index = self._estimate_curriculum_confidence(train_dataset)
+                        curriculum_sampler.update_confidence(confidence_by_index)
+
+                    selected_indices, snapshot = curriculum_sampler.select_indices(
+                        train_dataset,
+                        epoch=epoch,
+                        total_epochs=self.config.num_epochs,
+                    )
+                    curriculum_fraction = float(snapshot.fraction)
+                    curriculum_selected = int(snapshot.selected_samples)
+                    if curriculum_selected < len(train_dataset):
+                        epoch_train_loader = self._build_train_loader(
+                            Subset(train_dataset, selected_indices)
+                        )
+                    logger.debug(
+                        "curriculum_epoch_subset_selected",
+                        epoch=epoch + 1,
+                        strategy=snapshot.strategy,
+                        fraction=curriculum_fraction,
+                        selected_samples=curriculum_selected,
+                        total_samples=int(snapshot.total_samples),
+                    )
+
                 # Train
-                train_loss, train_accuracy = self.train_epoch(train_loader)
+                train_loss, train_accuracy = self.train_epoch(epoch_train_loader)
 
                 # Validate
                 val_loss, val_accuracy = self.validate(val_loader)
@@ -796,6 +911,8 @@ class SignTrainer:
                     val_loss=val_loss,
                     val_acc=val_accuracy,
                     lr=current_lr,
+                    curriculum_fraction=curriculum_fraction,
+                    curriculum_selected=curriculum_selected,
                 )
 
                 # Log metrics to MLflow
@@ -806,6 +923,8 @@ class SignTrainer:
                     "val_accuracy": val_accuracy,
                     "learning_rate": current_lr,
                     "epoch_duration_sec": epoch_duration,
+                    "curriculum_fraction": curriculum_fraction,
+                    "curriculum_selected_samples": float(curriculum_selected),
                 }, step=epoch + 1)
 
                 # Progress callback
@@ -839,7 +958,7 @@ class SignTrainer:
                         )
                         break
 
-            self._maybe_select_swa_model(train_loader, val_loader)
+            self._maybe_select_swa_model(full_train_loader, val_loader)
 
             # Restore best model
             if self.best_model_state is not None:
@@ -921,6 +1040,12 @@ class SignTrainer:
                 "use_distillation": self.config.use_distillation,
                 "distillation_alpha": self.config.distillation_alpha,
                 "distillation_temperature": self.config.distillation_temperature,
+                "use_curriculum": self.config.use_curriculum,
+                "curriculum_strategy": self.config.curriculum_strategy,
+                "curriculum_start_fraction": self.config.curriculum_start_fraction,
+                "curriculum_warmup_epochs": self.config.curriculum_warmup_epochs,
+                "curriculum_min_samples": self.config.curriculum_min_samples,
+                "curriculum_confidence_momentum": self.config.curriculum_confidence_momentum,
                 "class_weight_power": self.config.class_weight_power,
                 "class_weight_min": self.config.class_weight_min,
                 "class_weight_max": self.config.class_weight_max,

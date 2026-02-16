@@ -2386,8 +2386,16 @@ class TrainingService:
                         else None
                     ),
                     use_distillation=use_distillation,
-                    distillation_alpha=float(config.get("distillation_alpha", 0.25)),
-                    distillation_temperature=float(config.get("distillation_temperature", 2.0)),
+                    distillation_alpha=float(config.get("distillation_alpha", 0.5)),
+                    distillation_temperature=float(config.get("distillation_temperature", 4.0)),
+                    use_curriculum=bool(config.get("use_curriculum", False)),
+                    curriculum_strategy=str(config.get("curriculum_strategy", "length")),
+                    curriculum_start_fraction=float(config.get("curriculum_start_fraction", 0.4)),
+                    curriculum_warmup_epochs=int(config.get("curriculum_warmup_epochs", 2)),
+                    curriculum_min_samples=int(config.get("curriculum_min_samples", 64)),
+                    curriculum_confidence_momentum=float(
+                        config.get("curriculum_confidence_momentum", 0.8)
+                    ),
                     class_weight_power=float(config.get("class_weight_power", 0.5)),
                     class_weight_min=float(config.get("class_weight_min", 0.35)),
                     class_weight_max=float(config.get("class_weight_max", 4.0)),

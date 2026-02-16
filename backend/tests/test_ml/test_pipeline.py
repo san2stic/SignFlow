@@ -203,3 +203,21 @@ def test_pipeline_exposes_decision_diagnostics() -> None:
     counters = diagnostics["counters"]
     assert counters["rejected_total"] >= 1
     assert diagnostics["last_decision_trace"]["status"] == "rejected"
+
+
+def test_pipeline_phase6_tta_generates_augmented_views() -> None:
+    """Phase-6 TTA config should create non-identical additional views."""
+    pipeline = SignFlowInferencePipeline(
+        seq_len=64,
+        inference_num_views=5,
+        tta_enable_mirror=True,
+        tta_enable_temporal_jitter=True,
+        tta_enable_spatial_noise=True,
+        tta_spatial_noise_std=0.01,
+    )
+    window = np.ones((64, 469), dtype=np.float32)
+
+    views = pipeline._build_inference_views(window)
+
+    assert len(views) == 5
+    assert any(not np.array_equal(view, window) for view in views[1:])

@@ -157,6 +157,11 @@ def get_or_create_pipeline() -> SignFlowInferencePipeline:
                 inference_num_views=settings.translate_inference_num_views,
                 inference_temperature=settings.translate_inference_temperature,
                 max_view_disagreement=settings.translate_max_view_disagreement,
+                tta_enable_mirror=settings.translate_tta_enable_mirror,
+                tta_enable_temporal_jitter=settings.translate_tta_enable_temporal_jitter,
+                tta_enable_spatial_noise=settings.translate_tta_enable_spatial_noise,
+                tta_temporal_jitter_ratio=settings.translate_tta_temporal_jitter_ratio,
+                tta_spatial_noise_std=settings.translate_tta_spatial_noise_std,
                 calibration_temperature=(
                     float(calibration_temperature)
                     if calibration_temperature is not None
@@ -181,6 +186,11 @@ def get_or_create_pipeline() -> SignFlowInferencePipeline:
                 inference_num_views=settings.translate_inference_num_views,
                 inference_temperature=settings.translate_inference_temperature,
                 max_view_disagreement=settings.translate_max_view_disagreement,
+                tta_enable_mirror=settings.translate_tta_enable_mirror,
+                tta_enable_temporal_jitter=settings.translate_tta_enable_temporal_jitter,
+                tta_enable_spatial_noise=settings.translate_tta_enable_spatial_noise,
+                tta_temporal_jitter_ratio=settings.translate_tta_temporal_jitter_ratio,
+                tta_spatial_noise_std=settings.translate_tta_spatial_noise_std,
             )
             pipeline.set_labels(labels)
 
@@ -198,6 +208,11 @@ def get_or_create_pipeline() -> SignFlowInferencePipeline:
             inference_num_views=settings.translate_inference_num_views,
             inference_temperature=settings.translate_inference_temperature,
             max_view_disagreement=settings.translate_max_view_disagreement,
+            tta_enable_mirror=settings.translate_tta_enable_mirror,
+            tta_enable_temporal_jitter=settings.translate_tta_enable_temporal_jitter,
+            tta_enable_spatial_noise=settings.translate_tta_enable_spatial_noise,
+            tta_temporal_jitter_ratio=settings.translate_tta_temporal_jitter_ratio,
+            tta_spatial_noise_std=settings.translate_tta_spatial_noise_std,
         )
         try:
             labels = [item.slug for item in db.scalars(select(Sign).order_by(Sign.name.asc())).all()]
@@ -247,6 +262,11 @@ def load_pipeline_for_model(model_id: str) -> SignFlowInferencePipeline | None:
             inference_num_views=settings.translate_inference_num_views,
             inference_temperature=settings.translate_inference_temperature,
             max_view_disagreement=settings.translate_max_view_disagreement,
+            tta_enable_mirror=settings.translate_tta_enable_mirror,
+            tta_enable_temporal_jitter=settings.translate_tta_enable_temporal_jitter,
+            tta_enable_spatial_noise=settings.translate_tta_enable_spatial_noise,
+            tta_temporal_jitter_ratio=settings.translate_tta_temporal_jitter_ratio,
+            tta_spatial_noise_std=settings.translate_tta_spatial_noise_std,
             calibration_temperature=(
                 float(calibration_temperature)
                 if calibration_temperature is not None
