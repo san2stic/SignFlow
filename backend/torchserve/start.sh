@@ -25,6 +25,7 @@ if [ "$DEVICE" = "cuda" ]; then
     echo "🔧 Configuring TorchServe with $TS_NUMBER_OF_GPU CUDA GPU(s)"
     exec torchserve \
         --start \
+        --foreground \
         --model-store /home/model-server/model-store \
         --ts-config /home/model-server/config/config.properties \
         --ncs
@@ -34,6 +35,7 @@ elif [ "$DEVICE" = "mps" ]; then
     echo "⚠️  Note: TorchServe handlers will use MPS via PyTorch directly"
     exec torchserve \
         --start \
+        --foreground \
         --model-store /home/model-server/model-store \
         --ts-config /home/model-server/config/config.properties \
         --ncs
@@ -41,6 +43,7 @@ else
     echo "🔧 Configuring TorchServe with CPU"
     exec torchserve \
         --start \
+        --foreground \
         --model-store /home/model-server/model-store \
         --ts-config /home/model-server/config/config.properties \
         --ncs

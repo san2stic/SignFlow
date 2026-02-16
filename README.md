@@ -1,98 +1,148 @@
 # SignFlow
 
-Plateforme mobile-first de traduction LSFB en temps réel, entraînement few-shot continu, et dictionnaire interconnecté style Obsidian.
+SignFlow is a full-stack platform for real-time sign language translation, continuous model training, and an interactive dictionary/knowledge graph.
 
-## Scope V1
+## What is in this repository
 
-- Cible: **LSFB** (Langue des Signes de Belgique Francophone)
-- Focus produit: **Translate + Train + Dictionary + Dashboard**
-- Déploiement: **local Docker** + **stack prod reverse-proxy Caddy**
+- Backend API (FastAPI + WebSocket + ML pipeline + training orchestration)
+- Frontend app (React + TypeScript + Vite + Tailwind + Zustand)
+- Video labeling and few-shot training workflow (API complete, advanced UI present in code)
+- Model versioning, activation, export, canary/shadow routing support
+- Dockerized local and production-like stacks
 
-## Fonctionnalités livrées
+## Current implementation status
 
-- Backend FastAPI v1 (REST + WebSocket traduction live)
-- Pipeline ML landmarks -> Transformer -> post-processing
-- Few-shot training avec versioning de modèles, seuil de déploiement et activation
-- CRUD signes + upload vidéos + extraction landmarks backend
-- Video Labeling:
-  - interface de labellisation assistée par ML
-  - suggestions intelligentes basées sur similarité cosinus
-  - labellisation groupée de vidéos similaires
-  - recherche et création de signes inline
-- Dictionary:
-  - graphe relationnel
-  - notes markdown + wikilinks `[[...]]`
-  - backlinks API
-  - import/export `json`, `markdown`, `obsidian-vault`
-- Dashboard:
-  - KPIs
-  - accuracy history
-  - signs per category
-  - activation/export modèle
-- Frontend PWA:
-  - manifest + service worker
-  - fallback offline sur données dictionary en cache
+Implemented and usable today:
+- Auth: register/login/profile (`/api/v1/auth/*`)
+- Real-time translation stream (`WS /api/v1/translate/stream`)
+- Sign CRUD + sign videos upload/list
+- Dictionary graph/search/export/import
+- Video labeling endpoints (`unlabeled`, `label`, `suggestions`, `bulk-label`)
+- Training sessions + live WS metrics + deploy endpoint
+- Model listing/activation/export
+- Dashboard stats endpoints
 
-## Démarrage local (dev)
+Frontend note:
+- Active routes currently use:
+  - `Dashboard.tsx` (demo/static style)
+  - `TranslatePage.tsx` (live camera + WS)
+  - `Dictionary.tsx` and `Training.tsx` placeholders
+- Advanced pages exist but are not mounted by default:
+  - `DashboardPage.tsx`, `DictionaryPage.tsx`, `TrainPage.tsx`, `SettingsPage.tsx`
+
+## Architecture
+
+### Backend
+
+- Python 3.11+
+- FastAPI (REST + WebSocket)
+- SQLAlchemy + Alembic
+- PostgreSQL default in Docker (SQLite also supported)
+- Redis + Celery for async training
+- PyTorch + MediaPipe + NumPy + scikit-learn
+- Optional TorchServe + ONNX Runtime + MLflow registry
+
+### Frontend
+
+- React 18 + TypeScript + Vite
+- Tailwind CSS + Zustand
+- MediaPipe JS + WebSocket
+- D3/Recharts for graph and dashboard visualizations
+- PWA manifest + service worker cache
+
+## Quick start (Docker, recommended)
 
 ```bash
 cp .env.example .env
 docker compose up --build
 ```
 
+Endpoints:
 - Frontend: `http://localhost:3000`
-- Backend: `http://localhost:8000`
-- Swagger: `http://localhost:8000/docs`
-- Le frontend appelle l'API via `/api/v1/*` (proxy Vite en dev), donc pas besoin de config `VITE_API_URL`/`VITE_WS_URL` par défaut.
+- Backend API: `http://localhost:8000`
+- Swagger docs: `http://localhost:8000/docs`
+- MLflow: `http://localhost:5001`
+- TorchServe ping: `http://localhost:8080/ping`
 
-### Déploiement VPS (frontend servi sur IP/domaine)
+## Native development
 
-- Éviter toute URL frontend en `localhost:8000` (REST et WS).
-- Servir frontend et API sous la même origine (ex: Caddy/Nginx proxy `/api/*` vers backend).
-- En mode dev distant (`:3000`), utiliser le proxy Vite vers backend (`VITE_DEV_PROXY_TARGET`).
-
-## Démarrage production-like (Caddy)
+### Backend
 
 ```bash
+cd backend
+python3 -m pip install -e .[dev]
 cp .env.example .env
-# définir SIGNFLOW_DOMAIN + credentials DB/Redis + auth Caddy dans .env
-# générer le hash Caddy:
-# docker run --rm caddy:2-alpine caddy hash-password --plaintext 'mot-de-passe-fort'
-docker compose -f docker-compose.prod.yml up --build
+uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
-- Entrée unique via Caddy: `http://localhost` (ou votre domaine)
-- API routée via `/api/*`
-- Accès protégé par HTTP Basic Auth (Caddy)
-- `/docs` et `/openapi.json` désactivés par défaut en production
+### Frontend
 
-## Setup dataset LSFB / WLASL
+```bash
+cd frontend
+npm install
+npm run dev
+```
 
-### Seed initial (10 signes LSFB)
+Vite in this repo is configured on port `3000`.
+
+## Compose variants
+
+- `docker-compose.yml`: full dev stack
+- `docker-compose.arm64.yml`: Apple Silicon override
+- `docker-compose.cpu.yml`: CPU-only TorchServe override
+- `docker-compose.gpu.yml`: NVIDIA GPU override
+- `docker-compose.prod.yml`: production-like stack with Caddy
+
+## Core API map
+
+Base prefix: `/api/v1`
+
+- Auth: `/auth/register`, `/auth/login`, `/auth/me`
+- Translate: `WS /translate/stream`, active-learning queue endpoints
+- Signs: CRUD + `/signs/{id}/videos` + `/signs/{id}/backlinks`
+- Media: `/media/{video_id}`, `/media/{video_id}/stream`
+- Videos labeling: `/videos/unlabeled`, `/videos/{id}/label`, `/videos/{id}/suggestions`, `/videos/bulk-label`
+- Training: `/training/sessions*` + `WS /training/sessions/{id}/live`
+- Models: `/models`, `/models/active`, `/models/{id}/activate`, `/models/{id}/export`
+- Dictionary: `/dictionary/graph`, `/dictionary/search`, `/dictionary/export`, `/dictionary/import`
+- Stats: `/stats/overview`, `/stats/accuracy-history`, `/stats/signs-per-category`
+
+Health and metrics:
+- `GET /healthz`
+- `GET /metrics`
+
+## Environment
+
+Primary template: `.env.example`
+
+Important variables:
+- Runtime/data: `ENV`, `DATABASE_URL`, `REDIS_URL`, `MODEL_DIR`, `VIDEO_DIR`, `EXPORT_DIR`
+- API controls: `CORS_ORIGINS`, `TRUSTED_HOSTS`, `ENABLE_DOCS`
+- Limits: `MAX_REQUEST_MB`, `RATE_LIMIT_PER_MINUTE`, `WRITE_RATE_LIMIT_PER_MINUTE`
+- Translation tuning: `TRANSLATE_*`
+- Optional serving: `USE_TORCHSERVE`, `TORCHSERVE_URL`, `TORCHSERVE_TIMEOUT_MS`
+- Canary/shadow routing: `CANARY_*`, `SHADOW_*`
+- Active learning/drift: `ACTIVE_LEARNING_*`, `DRIFT_*`
+- Auth: `JWT_SECRET_KEY`, `JWT_ALGORITHM`, `JWT_ACCESS_TOKEN_EXPIRE_MINUTES`
+
+## Dataset/bootstrap scripts
+
+Seed base signs:
 
 ```bash
 python scripts/seed_data.py
 ```
 
-### Bootstrap WLASL subset
+WLASL subset manifest:
 
 ```bash
-python scripts/download_dataset.py \
-  --dataset wlasl \
-  --max-signs 100 \
-  --clips-per-sign 20 \
-  --dry-run
+python scripts/download_dataset.py --dataset wlasl --max-signs 100 --clips-per-sign 20 --dry-run
 ```
 
-Téléchargement clips:
+With clip download:
 
 ```bash
-python scripts/download_dataset.py \
-  --dataset wlasl \
-  --max-signs 100 \
-  --clips-per-sign 20 \
-  --download-videos \
-  --skip-existing
+python scripts/download_dataset.py --dataset wlasl --max-signs 100 --clips-per-sign 20 --download-videos --skip-existing
 ```
 
 ## Tests
@@ -112,40 +162,23 @@ npm run test -- --run
 npm run build
 ```
 
-## Smoke E2E manuel (release)
+## Production-like run (Caddy)
 
-1. Ouvrir `Train`, créer/choisir un signe, enregistrer au moins 5 clips valides.
-2. Lancer l’entraînement few-shot et attendre `completed`.
-3. Valider step 4 avec live check WS, puis déployer le modèle.
-4. Ouvrir `Translate` et confirmer détection live du signe.
-5. Ouvrir `Dictionary`:
-   - vérifier détail/backlinks
-   - tester export/import zip
-6. Ouvrir `Dashboard`:
-   - vérifier courbe accuracy
-   - vérifier répartition catégories
+```bash
+cp .env.example .env
+# set SIGNFLOW_DOMAIN, POSTGRES_PASSWORD, REDIS_PASSWORD, and Caddy basic-auth envs
+docker compose -f docker-compose.prod.yml up --build
+```
 
-## API v1 (résumé)
+Caddy provides:
+- single-origin frontend + `/api/*` proxy
+- basic auth gate
+- security headers (HSTS, nosniff, frame deny, permissions policy)
 
-- `WS /api/v1/translate/stream`
-- `GET/POST/PUT/DELETE /api/v1/signs`
-- `GET /api/v1/signs/{sign_id}/backlinks`
-- `POST /api/v1/signs/{sign_id}/videos`
-- `GET /api/v1/signs/{sign_id}/videos`
-- `GET /api/v1/videos/unlabeled`
-- `PATCH /api/v1/videos/{video_id}/label`
-- `POST /api/v1/videos/{video_id}/suggestions`
-- `PATCH /api/v1/videos/bulk-label`
-- `GET/POST /api/v1/training/sessions`
-- `POST /api/v1/training/sessions/{session_id}/deploy`
-- `WS /api/v1/training/sessions/{session_id}/live`
-- `GET /api/v1/models`
-- `POST /api/v1/models/{model_id}/activate`
-- `GET /api/v1/models/{model_id}/export`
-- `GET /api/v1/dictionary/graph`
-- `GET /api/v1/dictionary/search`
-- `POST /api/v1/dictionary/export`
-- `POST /api/v1/dictionary/import`
-- `GET /api/v1/stats/overview`
-- `GET /api/v1/stats/accuracy-history`
-- `GET /api/v1/stats/signs-per-category`
+## Known gaps
+
+- Router currently mounts placeholder dictionary/training pages instead of advanced V2 pages.
+- Some UI navigation still points to `/train` while router path is `/training`.
+- Frontend has two API base strategies (`src/lib/api.ts` and `src/api/client.ts`) and should be consolidated.
+
+For deeper technical details, see `AGENTS.md`.

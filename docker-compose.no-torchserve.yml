@@ -1,0 +1,19 @@
+# docker-compose override pour démarrer SANS TorchServe
+# Usage: docker compose -f docker-compose.yml -f docker-compose.no-torchserve.yml up
+
+# Cette configuration désactive TorchServe pour permettre de tester
+# le reste de l'application pendant qu'on debug TorchServe
+
+services:
+  torchserve:
+    # Override avec un container qui ne fait rien
+    image: alpine:latest
+    command: ["tail", "-f", "/dev/null"]  # Keep container alive
+    healthcheck:
+      test: ["CMD", "true"]
+      interval: 30s
+
+  backend:
+    environment:
+      # Désactiver l'utilisation de TorchServe
+      - USE_TORCHSERVE=false
