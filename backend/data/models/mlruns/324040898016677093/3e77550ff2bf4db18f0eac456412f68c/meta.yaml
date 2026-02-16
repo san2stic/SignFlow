@@ -1,0 +1,14 @@
+artifact_uri: file:///app/data/models/mlruns/324040898016677093/3e77550ff2bf4db18f0eac456412f68c/artifacts
+end_time: 1771259172124
+entry_point_name: ''
+experiment_id: '324040898016677093'
+lifecycle_stage: active
+run_id: 3e77550ff2bf4db18f0eac456412f68c
+run_name: respected-rook-645
+source_name: ''
+source_type: 4
+source_version: ''
+start_time: 1771258533588
+status: 3
+tags: []
+user_id: signflow
