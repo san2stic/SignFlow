@@ -1,4 +1,10 @@
-{$SIGNFLOW_DOMAIN:localhost} {
+{
+  auto_https disable_redirects
+}
+
+:443 {
+  tls internal
+
   encode zstd gzip
 
   header {
@@ -10,8 +16,11 @@
     -Server
   }
 
-  @backend path /api/* /healthz
+  @backend path /api/* /healthz /docs /redoc /openapi.json
   reverse_proxy @backend backend:8000
+
+  @ws path /api/v1/translate/ws
+  reverse_proxy @ws backend:8000
 
   reverse_proxy frontend:8080
 }

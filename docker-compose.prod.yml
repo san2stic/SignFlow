@@ -1,9 +1,35 @@
 services:
+  wireguard:
+    image: linuxserver/wireguard:latest
+    container_name: signflow_wireguard
+    cap_add:
+      - NET_ADMIN
+      - SYS_MODULE
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=Europe/Paris
+      - SERVERURL=auto  # Détection automatique IP publique
+      - SERVERPORT=51820
+      - PEERS=5  # Nombre de clients (laptop, phone, tablet, etc.)
+      - PEERDNS=auto
+      - INTERNAL_SUBNET=10.13.13.0
+      - ALLOWEDIPS=10.13.13.0/24  # Réseau VPN uniquement
+      - LOG_CONFS=true
+    volumes:
+      - ./wireguard/config:/config
+      - /lib/modules:/lib/modules
+    ports:
+      - "51820:51820/udp"
+    sysctls:
+      - net.ipv4.conf.all.src_valid_mark=1
+    restart: unless-stopped
+    networks:
+      - signflow_network
+
   caddy:
     image: caddy:2-alpine
     restart: unless-stopped
-    environment:
-      - SIGNFLOW_DOMAIN=${SIGNFLOW_DOMAIN:-localhost}
     ports:
       - "80:80"
       - "443:443"
@@ -14,12 +40,16 @@ services:
     depends_on:
       - frontend
       - backend
+    networks:
+      - signflow_network
 
   frontend:
     build:
       context: ./frontend
       dockerfile: Dockerfile.prod
     restart: unless-stopped
+    networks:
+      - signflow_network
 
   backend:
     build: ./backend
@@ -41,8 +71,7 @@ services:
       - MODEL_DIR=/app/data/models
       - VIDEO_DIR=/app/data/videos
       - EXPORT_DIR=/app/data/exports
-      - CORS_ORIGINS=https://${SIGNFLOW_DOMAIN:-localhost},http://${SIGNFLOW_DOMAIN:-localhost}
-      - TRUSTED_HOSTS=${SIGNFLOW_DOMAIN:-localhost},localhost,127.0.0.1,testserver,backend
+      - TRUSTED_HOSTS=*
       - ENABLE_DOCS=false
       - MAX_REQUEST_MB=64
       - MAX_DICTIONARY_IMPORT_MB=30
@@ -67,6 +96,8 @@ services:
       - db
       - redis
       - elasticsearch
+    networks:
+      - signflow_network
 
   db:
     image: postgres:16-alpine
@@ -77,11 +108,15 @@ services:
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}
     volumes:
       - pgdata:/var/lib/postgresql/data
+    networks:
+      - signflow_network
 
   redis:
     image: redis:7-alpine
     command: redis-server --save 60 1000 --appendonly yes --requirepass ${REDIS_PASSWORD:?Set REDIS_PASSWORD}
     restart: unless-stopped
+    networks:
+      - signflow_network
 
   elasticsearch:
     image: docker.elastic.co/elasticsearch/elasticsearch:8.15.3
@@ -93,6 +128,8 @@ services:
       - ES_JAVA_OPTS=-Xms512m -Xmx512m
     volumes:
       - esdata:/usr/share/elasticsearch/data
+    networks:
+      - signflow_network
 
   celery_worker:
     build: ./backend
@@ -114,7 +151,7 @@ services:
       - MODEL_DIR=/app/data/models
       - VIDEO_DIR=/app/data/videos
       - EXPORT_DIR=/app/data/exports
-      - TRUSTED_HOSTS=${SIGNFLOW_DOMAIN:-localhost},localhost,127.0.0.1,testserver,backend
+      - TRUSTED_HOSTS=*
       - ENABLE_DOCS=false
       - MAX_REQUEST_MB=64
       - MAX_DICTIONARY_IMPORT_MB=30
@@ -126,6 +163,8 @@ services:
       - db
       - redis
       - elasticsearch
+    networks:
+      - signflow_network
 
   mlflow:
     image: python:3.11-slim
@@ -141,6 +180,8 @@ services:
       - ./backend/data/models/mlruns:/mlflow/mlruns
     environment:
       - MLFLOW_TRACKING_URI=file:///mlflow/mlruns
+    networks:
+      - signflow_network
 
   torchserve:
     build:
@@ -167,9 +208,18 @@ services:
       timeout: 10s
       retries: 3
       start_period: 60s
+    networks:
+      - signflow_network
 
 volumes:
   pgdata:
   esdata:
   caddy_data:
   caddy_config:
+
+networks:
+  signflow_network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16

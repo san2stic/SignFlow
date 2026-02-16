@@ -33,3 +33,6 @@ backend/data/exports/**
 # IDE
 .vscode/
 .idea/
+
+# WireGuard VPN (clés privées sensibles)
+wireguard/config/

@@ -2,7 +2,6 @@ services:
   backend:
     environment:
       - DATABASE_URL=sqlite:///./data/signflow.db
-      - CORS_ORIGINS=http://localhost:3000,http://127.0.0.1:3000
       - TRAINING_USE_CELERY=true
     depends_on:
       - redis

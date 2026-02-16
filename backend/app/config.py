@@ -32,7 +32,6 @@ class Settings(BaseSettings):
     video_dir: str = "/app/data/videos"
     export_dir: str = "/app/data/exports"
 
-    cors_origins: str = Field(default="http://localhost:3000")
     trusted_hosts: str = Field(default="localhost,127.0.0.1,testserver")
     enable_docs: bool | None = None
     max_upload_mb: int = Field(default=50, ge=1, le=1024)
@@ -88,11 +87,6 @@ class Settings(BaseSettings):
     jwt_secret_key: str = Field(default="your-secret-key-change-in-production-minimum-32-chars")
     jwt_algorithm: str = "HS256"
     jwt_access_token_expire_minutes: int = Field(default=10080, ge=1, le=525600)  # 7 days default
-
-    @property
-    def cors_origin_list(self) -> list[str]:
-        """Parse comma-separated CORS origins."""
-        return [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]
 
     @property
     def trusted_host_list(self) -> list[str]:

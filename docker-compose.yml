@@ -20,7 +20,6 @@ services:
       - MODEL_DIR=/app/data/models
       - VIDEO_DIR=/app/data/videos
       - EXPORT_DIR=/app/data/exports
-      - CORS_ORIGINS=http://localhost:3000
       - TRUSTED_HOSTS=localhost,127.0.0.1,testserver,backend,frontend
       - TRAINING_USE_CELERY=true
       - USE_TORCHSERVE=false

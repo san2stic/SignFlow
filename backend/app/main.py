@@ -9,7 +9,6 @@ try:
 except Exception:  # pragma: no cover
     structlog = None
 from fastapi import FastAPI, Request
-from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import JSONResponse, Response
 from sqlalchemy import inspect, text
@@ -41,13 +40,6 @@ app = FastAPI(
     openapi_url="/openapi.json" if settings.docs_enabled else None,
 )
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origin_regex=r".*",
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 app.add_middleware(TrustedHostMiddleware, allowed_hosts=settings.trusted_host_list)
 
 
