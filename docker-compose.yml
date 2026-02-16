@@ -40,7 +40,7 @@ services:
       - "3000:3000"
     volumes:
       - ./frontend:/app
-      - /app/node_modules
+      - frontend_node_modules:/app/node_modules
     environment:
       - VITE_DEV_PROXY_TARGET=http://backend:8000
 
@@ -82,9 +82,9 @@ services:
     image: python:3.11-slim
     command: >
       sh -c "pip install mlflow>=2.10.0 &&
-             mlflow ui --host 0.0.0.0 --port 5000 --backend-store-uri file:///mlflow/mlruns"
+             mlflow ui --host 0.0.0.0 --port 5001 --backend-store-uri file:///mlflow/mlruns"
     ports:
-      - "5000:5000"
+      - "5001:5001"
     volumes:
       - ./backend/data/models/mlruns:/mlflow/mlruns
     environment:
@@ -103,7 +103,6 @@ services:
     volumes:
       - ./backend/torchserve/model-store:/home/model-server/model-store
       - ./backend/torchserve/config:/home/model-server/config
-      - ./backend/torchserve/start.sh:/home/model-server/start.sh:ro
     environment:
       # Device detection automatique dans start.sh
       - TS_NUMBER_OF_GPU=${TS_NUMBER_OF_GPU:-0}  # 0=auto-detect
@@ -126,3 +125,4 @@ services:
 
 volumes:
   pgdata:
+  frontend_node_modules:

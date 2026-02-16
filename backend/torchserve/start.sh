@@ -27,8 +27,7 @@ if [ "$DEVICE" = "cuda" ]; then
         --start \
         --model-store /home/model-server/model-store \
         --ts-config /home/model-server/config/config.properties \
-        --ncs \
-        --disable-token-auth
+        --ncs
 elif [ "$DEVICE" = "mps" ]; then
     echo "🔧 Configuring TorchServe with MPS (Apple Silicon GPU)"
     # MPS n'est pas supporté nativement par TorchServe, on utilise CPU avec note
@@ -37,14 +36,12 @@ elif [ "$DEVICE" = "mps" ]; then
         --start \
         --model-store /home/model-server/model-store \
         --ts-config /home/model-server/config/config.properties \
-        --ncs \
-        --disable-token-auth
+        --ncs
 else
     echo "🔧 Configuring TorchServe with CPU"
     exec torchserve \
         --start \
         --model-store /home/model-server/model-store \
         --ts-config /home/model-server/config/config.properties \
-        --ncs \
-        --disable-token-auth
+        --ncs
 fi

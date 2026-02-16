@@ -55,6 +55,10 @@ RUN mkdir -p /home/model-server/model-store \
 # Configuration par défaut
 COPY torchserve/config/config.properties /home/model-server/config/config.properties
 
+# Script de démarrage avec détection de device (AVANT création utilisateur)
+COPY torchserve/start.sh /home/model-server/start.sh
+RUN chmod +x /home/model-server/start.sh
+
 # Utilisateur non-root pour sécurité
 RUN useradd -m -u 1000 model-server && \
     chown -R model-server:model-server /home/model-server
@@ -64,9 +68,5 @@ WORKDIR /home/model-server
 
 # Ports TorchServe
 EXPOSE 8080 8081 8082
-
-# Script de démarrage avec détection de device
-COPY --chown=model-server:model-server torchserve/start.sh /home/model-server/start.sh
-RUN chmod +x /home/model-server/start.sh
 
 CMD ["/home/model-server/start.sh"]
