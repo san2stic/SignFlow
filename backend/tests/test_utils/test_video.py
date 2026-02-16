@@ -20,6 +20,16 @@ def test_validate_video_upload_accepts_video_with_codec_parameters() -> None:
     )
 
 
+def test_validate_video_upload_accepts_quicktime_mov() -> None:
+    """iOS uploads commonly use .mov + video/quicktime and should be accepted."""
+    validate_video_upload(
+        filename="clip.mov",
+        content_type="video/quicktime",
+        duration_ms=3000,
+        max_video_seconds=10,
+    )
+
+
 def test_validate_video_upload_rejects_non_video_content_type() -> None:
     """Non-video MIME types must still be rejected."""
     try:

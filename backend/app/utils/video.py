@@ -7,8 +7,14 @@ import os
 import subprocess
 from pathlib import Path
 
-ALLOWED_VIDEO_MIME_TYPES = {"video/webm", "video/mp4", "application/octet-stream"}
-ALLOWED_EXTENSIONS = {".webm", ".mp4"}
+ALLOWED_VIDEO_MIME_TYPES = {
+    "video/webm",
+    "video/mp4",
+    "video/quicktime",
+    "video/x-m4v",
+    "application/octet-stream",
+}
+ALLOWED_EXTENSIONS = {".webm", ".mp4", ".mov", ".m4v"}
 
 
 def normalize_content_type(content_type: str | None) -> str | None:
@@ -23,7 +29,8 @@ def validate_video_filename(filename: str) -> None:
     extension = Path(filename).suffix.lower()
     mime, _ = mimetypes.guess_type(filename)
     if extension not in ALLOWED_EXTENSIONS:
-        raise ValueError("Unsupported video extension")
+        allowed = ", ".join(sorted(ALLOWED_EXTENSIONS))
+        raise ValueError(f"Unsupported video extension. Allowed: {allowed}")
     if mime and mime not in ALLOWED_VIDEO_MIME_TYPES:
         raise ValueError("Unsupported video MIME type")
 
