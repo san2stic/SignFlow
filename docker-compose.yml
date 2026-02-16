@@ -77,5 +77,26 @@ services:
     environment:
       - MLFLOW_TRACKING_URI=file:///mlflow/mlruns
 
+  torchserve:
+    image: pytorch/torchserve:latest-gpu
+    container_name: signflow_torchserve
+    ports:
+      - "8080:8080"  # Inference API
+      - "8081:8081"  # Management API
+      - "8082:8082"  # Metrics API (Prometheus)
+    volumes:
+      - ./backend/torchserve/model-store:/home/model-server/model-store
+      - ./backend/torchserve/config:/home/model-server/config
+    environment:
+      - TS_NUMBER_OF_GPU=1
+      - TS_INSTALL_PY_DEP_PER_MODEL=true
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              capabilities: [gpu]
+              count: 1
+
 volumes:
   pgdata:
