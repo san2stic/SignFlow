@@ -17,6 +17,14 @@ from app.ml.trainer import load_model_checkpoint
 
 logger = structlog.get_logger(__name__)
 
+# Optional ONNX Runtime import
+try:
+    import onnxruntime as ort
+    ONNX_AVAILABLE = True
+except ImportError:
+    ONNX_AVAILABLE = False
+    logger.debug("onnxruntime_not_available", msg="ONNXRuntime not installed")
+
 
 class InferenceState(Enum):
     """States for the inference state machine."""
@@ -143,6 +151,8 @@ class SignFlowInferencePipeline:
 
         # Load model if path provided
         self.model: SignTransformer | None = None
+        self.onnx_session: ort.InferenceSession | None = None
+        self.use_onnx = False
         if model_path:
             self.load_model(model_path)
 
@@ -163,24 +173,82 @@ class SignFlowInferencePipeline:
 
     def load_model(self, model_path: str | Path) -> None:
         """
-        Load PyTorch model from checkpoint.
+        Load model from checkpoint (supports both PyTorch .pt and ONNX .onnx).
 
         Args:
-            model_path: Path to .pt checkpoint file
+            model_path: Path to .pt or .onnx checkpoint file
         """
+        model_path = Path(model_path)
+
+        # Check if ONNX model
+        if model_path.suffix == ".onnx":
+            self._load_onnx_model(model_path)
+        else:
+            self._load_pytorch_model(model_path)
+
+    def _load_pytorch_model(self, model_path: Path) -> None:
+        """Load PyTorch model from checkpoint."""
         try:
-            logger.info("loading_model", path=str(model_path))
-            self.model = load_model_checkpoint(model_path, device=str(self.device))
+            logger.info("loading_pytorch_model", path=str(model_path))
+            self.model = load_model_checkpoint(str(model_path), device=str(self.device))
             self.model.to(self.device)
             self.model.set_inference_mode()
+            self.use_onnx = False
+            self.onnx_session = None
             logger.info(
-                "model_loaded_successfully",
+                "pytorch_model_loaded_successfully",
                 num_classes=self.model.num_classes,
                 device=str(self.device),
             )
         except Exception as e:
-            logger.error("failed_to_load_model", path=str(model_path), error=str(e))
+            logger.error("failed_to_load_pytorch_model", path=str(model_path), error=str(e))
             self.model = None
+            raise
+
+    def _load_onnx_model(self, model_path: Path) -> None:
+        """Load ONNX model for inference."""
+        if not ONNX_AVAILABLE:
+            logger.error(
+                "onnx_load_failed",
+                reason="onnxruntime_not_installed",
+                path=str(model_path)
+            )
+            raise ImportError("onnxruntime is required for ONNX model inference")
+
+        try:
+            logger.info("loading_onnx_model", path=str(model_path))
+
+            # Determine execution providers based on device
+            if self.device.type == "cuda":
+                providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
+            else:
+                providers = ["CPUExecutionProvider"]
+
+            # Create ONNX Runtime session
+            self.onnx_session = ort.InferenceSession(
+                str(model_path),
+                providers=providers
+            )
+
+            # Clear PyTorch model
+            self.model = None
+            self.use_onnx = True
+
+            # Get model info
+            input_shape = self.onnx_session.get_inputs()[0].shape
+            output_shape = self.onnx_session.get_outputs()[0].shape
+
+            logger.info(
+                "onnx_model_loaded_successfully",
+                path=str(model_path),
+                input_shape=input_shape,
+                output_shape=output_shape,
+                providers=self.onnx_session.get_providers(),
+            )
+
+        except Exception as e:
+            logger.error("failed_to_load_onnx_model", path=str(model_path), error=str(e))
+            self.onnx_session = None
             raise
 
     def set_labels(self, labels: list[str]) -> None:
@@ -523,10 +591,20 @@ class SignFlowInferencePipeline:
 
     def _infer_probabilities(self, window: np.ndarray) -> tuple[np.ndarray, float]:
         """Run inference on one or multiple temporal views and return mean probabilities."""
-        if self.model is None:
+        if self.model is None and self.onnx_session is None:
             return np.array([], dtype=np.float32), 0.0
 
         views = self._build_inference_views(window)
+
+        # ONNX inference path
+        if self.use_onnx and self.onnx_session is not None:
+            return self._infer_probabilities_onnx(views)
+
+        # PyTorch inference path
+        return self._infer_probabilities_pytorch(views)
+
+    def _infer_probabilities_pytorch(self, views: list[np.ndarray]) -> tuple[np.ndarray, float]:
+        """Run PyTorch inference on multiple views."""
         stacked_probs: list[torch.Tensor] = []
 
         with torch.no_grad():
@@ -545,6 +623,40 @@ class SignFlowInferencePipeline:
         mean_probs = mean_probs / mean_probs.sum().clamp_min(1e-8)
         disagreement = float(probs_stack.std(dim=0, unbiased=False).mean().item())
         return mean_probs.cpu().numpy(), disagreement
+
+    def _infer_probabilities_onnx(self, views: list[np.ndarray]) -> tuple[np.ndarray, float]:
+        """Run ONNX Runtime inference on multiple views."""
+        stacked_probs: list[np.ndarray] = []
+
+        for view in views:
+            # Prepare input: [1, seq_len, features]
+            onnx_input = view.astype(np.float32).reshape(1, view.shape[0], view.shape[1])
+
+            # Run ONNX inference
+            input_name = self.onnx_session.get_inputs()[0].name
+            output_name = self.onnx_session.get_outputs()[0].name
+            logits = self.onnx_session.run([output_name], {input_name: onnx_input})[0]
+
+            # Apply softmax with temperature
+            softmax_temp = self.calibration_temperature or self.inference_temperature
+            logits_scaled = logits / softmax_temp
+
+            # Compute softmax manually
+            exp_logits = np.exp(logits_scaled - logits_scaled.max(axis=1, keepdims=True))
+            probs = exp_logits / exp_logits.sum(axis=1, keepdims=True)
+
+            stacked_probs.append(probs.squeeze(0))
+
+        if not stacked_probs:
+            return np.array([], dtype=np.float32), 0.0
+
+        # Stack and average probabilities
+        probs_array = np.stack(stacked_probs, axis=0)
+        mean_probs = probs_array.mean(axis=0)
+        mean_probs = mean_probs / max(mean_probs.sum(), 1e-8)
+        disagreement = float(probs_array.std(axis=0, ddof=0).mean())
+
+        return mean_probs, disagreement
 
     def _build_inference_views(self, window: np.ndarray) -> list[np.ndarray]:
         """Create lightweight temporal views for test-time ensembling."""

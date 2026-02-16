@@ -20,6 +20,7 @@ from torch.utils.data import DataLoader, WeightedRandomSampler
 
 from app.ml.dataset import LandmarkDataset
 from app.ml.model import SignTransformer
+from app.ml.tracking import create_default_tracker
 
 logger = structlog.get_logger(__name__)
 
@@ -76,6 +77,11 @@ class TrainingConfig:
     weighted_sampler_power: float = 0.75
     weighted_sampler_min: float = 0.25
     weighted_sampler_max: float = 5.0
+
+    # MLflow tracking
+    use_mlflow: bool = True
+    mlflow_run_name: str | None = None
+    mlflow_tags: dict[str, str] | None = None
 
 
 @dataclass
@@ -701,6 +707,9 @@ class SignTrainer:
             batch_size=self.config.batch_size,
         )
 
+        # Initialize MLflow tracker
+        mlflow_tracker = create_default_tracker(enabled=self.config.use_mlflow)
+
         self._configure_criterion(train_dataset)
 
         # Create dataloaders
@@ -714,87 +723,140 @@ class SignTrainer:
             persistent_workers=self.config.num_workers > 0,
         )
 
-        # Training loop
-        for epoch in range(self.config.num_epochs):
-            epoch_start = time.time()
+        # Start MLflow run and log parameters
+        with mlflow_tracker.start_run(
+            run_name=self.config.mlflow_run_name,
+            tags=self.config.mlflow_tags or {}
+        ):
+            # Log hyperparameters
+            mlflow_tracker.log_params({
+                "num_epochs": self.config.num_epochs,
+                "learning_rate": self.config.learning_rate,
+                "batch_size": self.config.batch_size,
+                "device": str(self.device),
+                "sequence_length": self.config.sequence_length,
+                "weight_decay": self.config.weight_decay,
+                "label_smoothing": self.config.label_smoothing,
+                "warmup_epochs": self.config.warmup_epochs,
+                "use_mixup": self.config.use_mixup,
+                "mixup_alpha": self.config.mixup_alpha,
+                "use_ema": self.config.use_ema,
+                "ema_decay": self.config.ema_decay,
+                "use_amp": self.config.use_amp,
+                "use_swa": self.config.use_swa,
+                "use_focal_loss": self.config.use_focal_loss,
+                "d_model": self.model.d_model,
+                "num_layers": self.model.num_layers,
+                "nhead": self.model.nhead,
+                "num_classes": self.model.num_classes,
+                "num_features": self.model.num_features,
+                "train_size": len(train_dataset),
+                "val_size": len(val_dataset),
+            })
 
-            # Check stop signal before starting epoch
-            if self.stop_signal and self.stop_signal():
-                logger.info("training_stopped_before_epoch", epoch=epoch)
-                break
+            # Training loop
+            for epoch in range(self.config.num_epochs):
+                epoch_start = time.time()
 
-            # Train
-            train_loss, train_accuracy = self.train_epoch(train_loader)
-
-            # Validate
-            val_loss, val_accuracy = self.validate(val_loader)
-            self._maybe_update_swa(epoch + 1)
-
-            # Scheduler step
-            self.scheduler.step()
-            current_lr = float(self.optimizer.param_groups[0]["lr"])
-
-            # Metrics
-            epoch_duration = time.time() - epoch_start
-            metrics = TrainingMetrics(
-                epoch=epoch + 1,
-                train_loss=train_loss,
-                train_accuracy=train_accuracy,
-                val_loss=val_loss,
-                val_accuracy=val_accuracy,
-                learning_rate=current_lr,
-                duration_sec=epoch_duration,
-            )
-            self.metrics_history.append(metrics)
-
-            # Logging
-            logger.info(
-                "epoch_complete",
-                epoch=epoch + 1,
-                train_loss=train_loss,
-                train_acc=train_accuracy,
-                val_loss=val_loss,
-                val_acc=val_accuracy,
-                lr=current_lr,
-            )
-
-            # Progress callback
-            if self.progress_callback:
-                self.progress_callback(metrics)
-
-            # Early stopping check
-            improved = val_loss < (self.best_val_loss - self.config.early_stopping_min_delta)
-            if improved:
-                self.best_val_loss = val_loss
-                # Store the EMA-smoothed weights when enabled.
-                with self._swap_to_ema_weights():
-                    self.best_model_state = {
-                        key: value.detach().cpu().clone()
-                        for key, value in self.model.state_dict().items()
-                    }
-                self.epochs_without_improvement = 0
-                logger.debug("new_best_model", val_loss=val_loss)
-            else:
-                self.epochs_without_improvement += 1
-                logger.debug(
-                    "no_improvement",
-                    epochs_without_improvement=self.epochs_without_improvement,
-                )
-
-                if self.epochs_without_improvement >= self.config.early_stopping_patience:
-                    logger.info(
-                        "early_stopping_triggered",
-                        patience=self.config.early_stopping_patience,
-                        best_val_loss=self.best_val_loss,
-                    )
+                # Check stop signal before starting epoch
+                if self.stop_signal and self.stop_signal():
+                    logger.info("training_stopped_before_epoch", epoch=epoch)
                     break
 
-        self._maybe_select_swa_model(train_loader, val_loader)
+                # Train
+                train_loss, train_accuracy = self.train_epoch(train_loader)
 
-        # Restore best model
-        if self.best_model_state is not None:
-            self.model.load_state_dict(self.best_model_state)
-            logger.info("restored_best_model", val_loss=self.best_val_loss)
+                # Validate
+                val_loss, val_accuracy = self.validate(val_loader)
+                self._maybe_update_swa(epoch + 1)
+
+                # Scheduler step
+                self.scheduler.step()
+                current_lr = float(self.optimizer.param_groups[0]["lr"])
+
+                # Metrics
+                epoch_duration = time.time() - epoch_start
+                metrics = TrainingMetrics(
+                    epoch=epoch + 1,
+                    train_loss=train_loss,
+                    train_accuracy=train_accuracy,
+                    val_loss=val_loss,
+                    val_accuracy=val_accuracy,
+                    learning_rate=current_lr,
+                    duration_sec=epoch_duration,
+                )
+                self.metrics_history.append(metrics)
+
+                # Logging
+                logger.info(
+                    "epoch_complete",
+                    epoch=epoch + 1,
+                    train_loss=train_loss,
+                    train_acc=train_accuracy,
+                    val_loss=val_loss,
+                    val_acc=val_accuracy,
+                    lr=current_lr,
+                )
+
+                # Log metrics to MLflow
+                mlflow_tracker.log_metrics({
+                    "train_loss": train_loss,
+                    "train_accuracy": train_accuracy,
+                    "val_loss": val_loss,
+                    "val_accuracy": val_accuracy,
+                    "learning_rate": current_lr,
+                    "epoch_duration_sec": epoch_duration,
+                }, step=epoch + 1)
+
+                # Progress callback
+                if self.progress_callback:
+                    self.progress_callback(metrics)
+
+                # Early stopping check
+                improved = val_loss < (self.best_val_loss - self.config.early_stopping_min_delta)
+                if improved:
+                    self.best_val_loss = val_loss
+                    # Store the EMA-smoothed weights when enabled.
+                    with self._swap_to_ema_weights():
+                        self.best_model_state = {
+                            key: value.detach().cpu().clone()
+                            for key, value in self.model.state_dict().items()
+                        }
+                    self.epochs_without_improvement = 0
+                    logger.debug("new_best_model", val_loss=val_loss)
+                else:
+                    self.epochs_without_improvement += 1
+                    logger.debug(
+                        "no_improvement",
+                        epochs_without_improvement=self.epochs_without_improvement,
+                    )
+
+                    if self.epochs_without_improvement >= self.config.early_stopping_patience:
+                        logger.info(
+                            "early_stopping_triggered",
+                            patience=self.config.early_stopping_patience,
+                            best_val_loss=self.best_val_loss,
+                        )
+                        break
+
+            self._maybe_select_swa_model(train_loader, val_loader)
+
+            # Restore best model
+            if self.best_model_state is not None:
+                self.model.load_state_dict(self.best_model_state)
+                logger.info("restored_best_model", val_loss=self.best_val_loss)
+
+            # Log final metrics summary to MLflow
+            if self.metrics_history:
+                final_metrics = self.metrics_history[-1]
+                mlflow_tracker.log_metrics({
+                    "final_train_loss": final_metrics.train_loss,
+                    "final_train_accuracy": final_metrics.train_accuracy,
+                    "final_val_loss": final_metrics.val_loss,
+                    "final_val_accuracy": final_metrics.val_accuracy,
+                    "best_val_loss": self.best_val_loss,
+                    "total_epochs": len(self.metrics_history),
+                })
 
         return self.metrics_history
 
