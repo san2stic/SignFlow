@@ -84,6 +84,7 @@ def ensure_runtime_schema() -> None:
 
         if "videos" in table_names:
             video_columns = {column["name"] for column in inspector.get_columns("videos")}
+            video_indexes = {index["name"] for index in inspector.get_indexes("videos")}
             if "detection_rate" not in video_columns:
                 connection.execute(
                     text("ALTER TABLE videos ADD COLUMN detection_rate FLOAT NOT NULL DEFAULT 0")
@@ -100,6 +101,10 @@ def ensure_runtime_schema() -> None:
                 connection.execute(
                     text("ALTER TABLE videos ADD COLUMN landmark_feature_dim INTEGER NOT NULL DEFAULT 225")
                 )
+            if "user_id" not in video_columns:
+                connection.execute(text("ALTER TABLE videos ADD COLUMN user_id INTEGER"))
+            if "ix_videos_user_id" not in video_indexes:
+                connection.execute(text("CREATE INDEX ix_videos_user_id ON videos (user_id)"))
 
 
 @app.on_event("startup")
@@ -110,6 +115,9 @@ def on_startup() -> None:
             raise RuntimeError("CORS_ORIGINS cannot contain '*' in production")
         if settings.docs_enabled:
             logger.warning("docs_enabled_in_production")
+
+    # Import all models so SQLAlchemy metadata includes every table (including auth models).
+    import app.models  # noqa: F401
 
     Base.metadata.create_all(bind=engine)
     ensure_runtime_schema()

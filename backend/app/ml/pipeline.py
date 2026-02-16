@@ -16,6 +16,7 @@ from app.ml.features import FrameLandmarks, normalize_landmarks
 from app.ml.model import SignTransformer
 from app.ml.tta import TTAConfig, TTAGenerator
 from app.ml.trainer import load_model_checkpoint
+from app.ml.gpu_manager import get_gpu_manager
 
 logger = structlog.get_logger(__name__)
 
@@ -142,7 +143,13 @@ class SignFlowInferencePipeline:
             str(key): float(np.clip(value, 0.0, 1.0))
             for key, value in (class_thresholds or {}).items()
         }
-        self.device = torch.device(device)
+
+        # Setup device with GPU manager support
+        if device == "auto":
+            gpu_manager = get_gpu_manager()
+            self.device = gpu_manager.get_device()
+        else:
+            self.device = torch.device(device)
         self.frame_buffer: deque[np.ndarray] = deque(maxlen=max_buffer_frames)
         self.hand_visibility_history: deque[float] = deque(maxlen=seq_len)
         self.motion_history: deque[float] = deque(maxlen=seq_len)

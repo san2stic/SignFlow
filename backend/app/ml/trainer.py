@@ -23,6 +23,7 @@ from app.ml.distillation import DistillationTrainer
 from app.ml.dataset import LandmarkDataset
 from app.ml.model import SignTransformer
 from app.ml.tracking import create_default_tracker
+from app.ml.gpu_manager import GPUManager, GPUConfig, get_gpu_manager
 
 logger = structlog.get_logger(__name__)
 
@@ -185,8 +186,21 @@ class SignTrainer:
             alpha=float(self.config.distillation_alpha),
         )
 
+        # Setup GPU manager and device
+        if config.device == "auto":
+            self.gpu_manager = get_gpu_manager()
+            self.device = self.gpu_manager.get_device()
+        else:
+            self.device = torch.device(config.device)
+            gpu_config = GPUConfig(
+                device=config.device,
+                enable_amp=config.use_amp,
+                amp_dtype=config.amp_dtype,
+            )
+            self.gpu_manager = GPUManager(gpu_config)
+            self.gpu_manager.setup_device()
+
         # Move model to device
-        self.device = torch.device(config.device)
         self.model.to(self.device)
         if self.teacher_model is not None:
             self.teacher_model.to(self.device)
@@ -194,14 +208,23 @@ class SignTrainer:
             for parameter in self.teacher_model.parameters():
                 parameter.requires_grad = False
         self.accumulation_steps = max(1, int(self.config.gradient_accumulation_steps))
-        self.autocast_enabled = bool(self.config.use_amp and self.device.type == "cuda")
-        self.autocast_dtype = (
-            torch.bfloat16 if self.config.amp_dtype == "bfloat16" else torch.float16
-        )
-        try:
-            self.grad_scaler = torch.amp.GradScaler("cuda", enabled=self.autocast_enabled)
-        except (AttributeError, TypeError):
-            self.grad_scaler = torch.cuda.amp.GradScaler(enabled=self.autocast_enabled)
+
+        # Configure AMP based on device capabilities
+        self.autocast_enabled = self.gpu_manager.supports_amp()
+        if self.autocast_enabled:
+            amp_dtype = self.gpu_manager.get_amp_dtype()
+            self.autocast_dtype = amp_dtype if amp_dtype else torch.float16
+        else:
+            self.autocast_dtype = torch.float16
+        # Setup gradient scaler for AMP
+        if self.device.type == "cuda" and self.autocast_enabled:
+            try:
+                self.grad_scaler = torch.amp.GradScaler("cuda", enabled=True)
+            except (AttributeError, TypeError):
+                self.grad_scaler = torch.cuda.amp.GradScaler(enabled=True)
+        else:
+            # MPS and CPU don't use gradient scaler
+            self.grad_scaler = None
 
         # Loss function (initialized in fit once class distribution is known)
         self.criterion: nn.Module = nn.CrossEntropyLoss(label_smoothing=self.config.label_smoothing)
@@ -478,7 +501,7 @@ class SignTrainer:
 
     def _optimizer_step(self) -> None:
         """Apply optimizer step with optional AMP scaler."""
-        if self.autocast_enabled:
+        if self.grad_scaler is not None:
             self.grad_scaler.unscale_(self.optimizer)
 
         torch.nn.utils.clip_grad_norm_(
@@ -486,7 +509,7 @@ class SignTrainer:
             max_norm=self.config.gradient_clip_max_norm,
         )
 
-        if self.autocast_enabled:
+        if self.grad_scaler is not None:
             self.grad_scaler.step(self.optimizer)
             self.grad_scaler.update()
         else:
@@ -643,7 +666,7 @@ class SignTrainer:
             scaled_loss = loss / self.accumulation_steps
 
             # Backward pass
-            if self.autocast_enabled:
+            if self.grad_scaler is not None:
                 self.grad_scaler.scale(scaled_loss).backward()
             else:
                 scaled_loss.backward()
@@ -655,6 +678,8 @@ class SignTrainer:
             if should_step:
                 self._optimizer_step()
                 pending_grad_batches = 0
+                # GPU memory management
+                self.gpu_manager.on_batch_end()
 
             # Metrics
             total_loss += loss_value
