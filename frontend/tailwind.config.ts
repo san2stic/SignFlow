@@ -5,72 +5,70 @@ export default {
   theme: {
     extend: {
       colors: {
-        // Bioluminescent palette
+        // Premium cyan/teal palette
         primary: {
-          DEFAULT: "#0EA5E9", // Electric cyan
-          dark: "#0284C7",
-          light: "#38BDF8",
-          glow: "rgba(14, 165, 233, 0.4)"
+          DEFAULT: "#14B8A6", // teal
+          dark: "#0D9488",
+          light: "#5EEAD4",
+          glow: "rgba(20, 184, 166, 0.32)"
         },
         secondary: {
-          DEFAULT: "#8B5CF6", // Deep violet
-          dark: "#7C3AED",
-          light: "#A78BFA",
-          glow: "rgba(139, 92, 246, 0.3)"
+          DEFAULT: "#06B6D4", // cyan
+          dark: "#0891B2",
+          light: "#67E8F9",
+          glow: "rgba(6, 182, 212, 0.32)"
         },
         accent: {
-          DEFAULT: "#10B981", // Emerald
-          dark: "#059669",
-          light: "#34D399",
-          glow: "rgba(16, 185, 129, 0.3)"
+          DEFAULT: "#F59E0B",
+          dark: "#D97706",
+          light: "#FCD34D",
+          glow: "rgba(245, 158, 11, 0.3)"
         },
         background: {
-          DEFAULT: "#020617", // Deep space
-          elevated: "#0F172A",
-          card: "#1E1B4B"
+          DEFAULT: "#020617",
+          elevated: "#0B1224",
+          card: "#0E172E"
         },
         surface: {
-          DEFAULT: "rgba(30, 27, 75, 0.6)", // Glass violet
-          secondary: "rgba(15, 23, 42, 0.8)",
-          tertiary: "rgba(51, 65, 85, 0.4)"
+          DEFAULT: "rgba(15, 23, 42, 0.74)",
+          secondary: "rgba(12, 20, 39, 0.88)",
+          tertiary: "rgba(30, 41, 59, 0.5)"
         },
         text: {
           DEFAULT: "#F1F5F9",
-          secondary: "#CBD5E1",
-          tertiary: "#94A3B8",
-          muted: "#64748B"
+          secondary: "#D1D5DB",
+          tertiary: "#9CA3AF",
+          muted: "#6B7280"
         }
       },
       borderRadius: {
-        card: "24px",
-        btn: "16px",
+        card: "20px",
+        btn: "14px",
         blob: "60% 40% 30% 70% / 60% 30% 70% 40%"
       },
       fontFamily: {
-        // Ultra-modern display font
-        display: ["'Orbitron'", "'Exo 2'", "sans-serif"],
-        // Clean body font
-        body: ["'DM Sans'", "system-ui", "sans-serif"],
-        // Technical mono
-        mono: ["'Fira Code'", "'JetBrains Mono'", "monospace"]
+        display: ["'Sora'", "'Orbitron'", "sans-serif"],
+        heading: ["'Sora'", "'Orbitron'", "sans-serif"],
+        body: ["'Manrope'", "'DM Sans'", "system-ui", "sans-serif"],
+        mono: ["'JetBrains Mono'", "'Fira Code'", "monospace"]
       },
       boxShadow: {
-        glow: "0 0 20px rgba(14, 165, 233, 0.3), 0 0 40px rgba(139, 92, 246, 0.2)",
-        "glow-strong": "0 0 30px rgba(14, 165, 233, 0.5), 0 0 60px rgba(139, 92, 246, 0.3)",
-        inner: "inset 0 2px 4px rgba(0, 0, 0, 0.3)",
-        card: "0 8px 32px rgba(0, 0, 0, 0.4), inset 0 1px 0 rgba(255, 255, 255, 0.05)"
+        glow: "0 0 18px rgba(20, 184, 166, 0.25), 0 0 34px rgba(6, 182, 212, 0.2)",
+        "glow-strong": "0 0 28px rgba(20, 184, 166, 0.35), 0 0 50px rgba(6, 182, 212, 0.25)",
+        inner: "inset 0 2px 4px rgba(2, 6, 23, 0.45)",
+        card: "0 12px 30px rgba(2, 6, 23, 0.45), inset 0 1px 0 rgba(148, 163, 184, 0.08)"
       },
       animation: {
-        "pulse-slow": "pulse 4s cubic-bezier(0.4, 0, 0.6, 1) infinite",
+        "pulse-slow": "pulse 3.5s cubic-bezier(0.4, 0, 0.6, 1) infinite",
         "float": "float 6s ease-in-out infinite",
-        "shimmer": "shimmer 2s linear infinite",
-        "glow-pulse": "glow-pulse 3s ease-in-out infinite",
+        "shimmer": "shimmer 1.8s linear infinite",
+        "glow-pulse": "glow-pulse 2.4s ease-in-out infinite",
         "morph": "morph 8s ease-in-out infinite"
       },
       keyframes: {
         float: {
           "0%, 100%": { transform: "translateY(0px)" },
-          "50%": { transform: "translateY(-20px)" }
+          "50%": { transform: "translateY(-14px)" }
         },
         shimmer: {
           "0%": { backgroundPosition: "-200% 0" },
@@ -79,11 +77,11 @@ export default {
         "glow-pulse": {
           "0%, 100%": {
             opacity: "1",
-            filter: "brightness(1) drop-shadow(0 0 10px currentColor)"
+            filter: "brightness(1) drop-shadow(0 0 8px currentColor)"
           },
           "50%": {
             opacity: "0.8",
-            filter: "brightness(1.2) drop-shadow(0 0 20px currentColor)"
+            filter: "brightness(1.1) drop-shadow(0 0 14px currentColor)"
           }
         },
         morph: {
@@ -93,6 +91,9 @@ export default {
       },
       backdropBlur: {
         xs: "2px"
+      },
+      maxWidth: {
+        app: "1240px"
       }
     }
   },

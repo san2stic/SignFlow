@@ -11,9 +11,18 @@ const TranslatePage = lazy(async () => {
   const module = await import("./pages/TranslatePage");
   return { default: module.TranslatePage };
 });
-const Dictionary = lazy(() => import("./pages/Dictionary"));
-const Training = lazy(() => import("./pages/Training"));
-const Settings = lazy(() => import("./pages/Settings"));
+const DictionaryPage = lazy(async () => {
+  const module = await import("./pages/DictionaryPage");
+  return { default: module.DictionaryPage };
+});
+const TrainPage = lazy(async () => {
+  const module = await import("./pages/TrainPage");
+  return { default: module.TrainPage };
+});
+const SettingsPage = lazy(async () => {
+  const module = await import("./pages/SettingsPage");
+  return { default: module.SettingsPage };
+});
 const Profile = lazy(() => import("./pages/Profile"));
 
 function RouteFallback(): JSX.Element {
@@ -70,9 +79,10 @@ export const router = createBrowserRouter([
       { index: true, element: <Navigate to="/dashboard" replace /> },
       { path: "dashboard", element: withSuspense(<Dashboard />) },
       { path: "translate", element: withSuspense(<TranslatePage />) },
-      { path: "dictionary", element: withSuspense(<Dictionary />) },
-      { path: "training", element: withSuspense(<Training />) },
-      { path: "settings", element: withSuspense(<Settings />) },
+      { path: "dictionary", element: withSuspense(<DictionaryPage />) },
+      { path: "training", element: withSuspense(<TrainPage />) },
+      { path: "train", element: withSuspense(<TrainPage />) },
+      { path: "settings", element: withSuspense(<SettingsPage />) },
       { path: "profile", element: withSuspense(<Profile />) },
       { path: "*", element: <Navigate to="/dashboard" replace /> },
     ],

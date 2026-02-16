@@ -1,29 +1,27 @@
 import { NavLink } from "react-router-dom";
-
-// Legacy component - keeping for backward compatibility but not used in new layout
-const legacyRouteItems = [
-  { path: "/dashboard", label: "Dashboard", icon: "📊" },
-  { path: "/translate", label: "Translate", icon: "📹" },
-  { path: "/dictionary", label: "Dictionary", icon: "📖" },
-];
+import { MOBILE_NAV_ITEMS } from "./navItems";
 
 export function BottomNav(): JSX.Element {
+  const mobileItems = MOBILE_NAV_ITEMS;
+
   return (
-    <nav className="fixed bottom-0 left-0 right-0 z-50 border-t border-slate-700 bg-surface/95 p-2 backdrop-blur md:hidden">
-      <ul className="grid grid-cols-5 gap-1">
-        {legacyRouteItems.map((route) => (
-          <li key={route.path}>
+    <nav className="fixed bottom-0 left-0 right-0 z-50 border-t border-slate-700/80 bg-slate-950/90 px-2 pb-[max(0.6rem,env(safe-area-inset-bottom))] pt-2 backdrop-blur md:hidden">
+      <ul className="grid gap-1" style={{ gridTemplateColumns: `repeat(${mobileItems.length}, minmax(0, 1fr))` }}>
+        {mobileItems.map((route) => (
+          <li key={route.to}>
             <NavLink
-              to={route.path}
-              end={route.path === "/translate"}
+              to={route.to}
+              end={route.to === "/dashboard"}
               className={({ isActive }) =>
-                `flex touch-btn flex-col items-center justify-center gap-1 text-xs ${
-                  isActive ? "bg-primary/20 text-primary" : "text-slate-300"
+                `flex min-h-14 flex-col items-center justify-center gap-1 rounded-btn px-1 text-[11px] font-medium transition ${
+                  isActive
+                    ? "bg-gradient-to-r from-primary/25 to-secondary/25 text-white ring-1 ring-primary/40"
+                    : "text-slate-300 hover:bg-slate-800/75"
                 }`
               }
             >
-              <span aria-hidden>{route.icon}</span>
-              <span>{route.label}</span>
+              <route.icon aria-hidden className="h-4 w-4" />
+              <span className="truncate">{route.label}</span>
             </NavLink>
           </li>
         ))}

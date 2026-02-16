@@ -10,8 +10,8 @@ export function SignCard({ sign, onSelect, onTrain }: SignCardProps): JSX.Elemen
   return (
     <article className="card w-full p-4">
       <button type="button" onClick={() => onSelect?.(sign)} className="w-full text-left">
-        <h3 className="font-heading text-lg">{sign.name}</h3>
-        <p className="mt-1 line-clamp-2 text-sm text-slate-300">{sign.description ?? "No description"}</p>
+        <h3 className="font-heading text-lg text-white">{sign.name}</h3>
+        <p className="mt-1 line-clamp-2 text-sm text-slate-300">{sign.description ?? "Aucune description"}</p>
         <div className="mt-2 flex flex-wrap gap-1 text-xs text-slate-400">
           {sign.tags.map((tag) => (
             <span key={tag} className="rounded-full bg-slate-700/60 px-2 py-1">
@@ -20,12 +20,12 @@ export function SignCard({ sign, onSelect, onTrain }: SignCardProps): JSX.Elemen
           ))}
         </div>
         <div className="mt-2 text-xs text-slate-400">
-          {sign.video_count} videos • {Math.round((sign.accuracy ?? 0) * 100)}% acc
+          {sign.video_count} videos • {Math.round((sign.accuracy ?? 0) * 100)}% precision
         </div>
       </button>
       <div className="mt-3">
-        <button type="button" className="touch-btn bg-primary text-white" onClick={() => onTrain?.(sign)}>
-          Train
+        <button type="button" className="touch-btn bg-gradient-to-r from-primary to-secondary text-slate-950" onClick={() => onTrain?.(sign)}>
+          Entrainer
         </button>
       </div>
     </article>

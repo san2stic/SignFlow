@@ -75,9 +75,9 @@ Le frontend sera accessible sur `http://localhost:5173`
 ### 🗂️ Pages
 1. **Dashboard** : Vue d'ensemble avec statistiques et graphiques
 2. **Translation** : Interface de traduction en temps réel (existante)
-3. **Dictionary** : Dictionnaire de signes (placeholder)
-4. **Training & Labeling** : Outils d'entraînement (placeholder)
-5. **Settings** : Paramètres de l'application (placeholder)
+3. **Dictionary** : Dictionnaire de signes complet (graph/cards/detail/backlinks)
+4. **Training & Labeling** : Outils d'entraînement et labellisation actifs
+5. **Settings** : Paramètres de traduction (speech, unknown-sign)
 6. **Profile** : Gestion du profil utilisateur
 
 ## 🏗️ Architecture

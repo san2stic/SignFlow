@@ -24,7 +24,7 @@ type SimLink = {
 };
 
 function categoryColor(category: string | undefined): string {
-  const palette = ["#6366f1", "#10b981", "#f59e0b", "#38bdf8", "#f43f5e", "#22c55e", "#eab308"];
+  const palette = ["#14b8a6", "#06b6d4", "#22d3ee", "#f59e0b", "#2dd4bf", "#38bdf8", "#0ea5e9"];
   if (!category) return "#94a3b8";
   let hash = 0;
   for (let idx = 0; idx < category.length; idx += 1) {
@@ -181,9 +181,9 @@ export class GraphView extends React.PureComponent<GraphViewProps> {
     return (
       <div className="card p-4">
         <div className="mb-3 flex items-center justify-between">
-          <h3 className="font-heading text-lg">Relation Graph</h3>
+          <h3 className="font-heading text-lg">Graphe de relations</h3>
           <span className="font-mono text-xs text-slate-400">
-            {summary.nodes} nodes • {summary.edges} edges
+            {summary.nodes} noeuds • {summary.edges} liens
           </span>
         </div>
         <div
@@ -191,7 +191,7 @@ export class GraphView extends React.PureComponent<GraphViewProps> {
           className="relative min-h-[460px] overflow-hidden rounded-card border border-slate-700/60 bg-slate-900/50"
         >
           {summary.nodes === 0 ? (
-            <p className="p-5 text-sm text-slate-400">No graph data yet.</p>
+            <p className="p-5 text-sm text-slate-400">Aucune donnee de graphe disponible.</p>
           ) : (
             <svg ref={this.svgRef} className="h-[460px] w-full" aria-label="Dictionary relation graph" />
           )}

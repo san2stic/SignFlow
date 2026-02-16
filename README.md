@@ -24,11 +24,10 @@ Implemented and usable today:
 
 Frontend note:
 - Active routes currently use:
-  - `Dashboard.tsx` (demo/static style)
+  - `Dashboard.tsx` (dashboard shell + live metrics sections)
   - `TranslatePage.tsx` (live camera + WS)
-  - `Dictionary.tsx` and `Training.tsx` placeholders
-- Advanced pages exist but are not mounted by default:
-  - `DashboardPage.tsx`, `DictionaryPage.tsx`, `TrainPage.tsx`, `SettingsPage.tsx`
+  - `DictionaryPage.tsx`, `TrainPage.tsx`, `SettingsPage.tsx`, `Profile.tsx`
+  - Compatibility alias route: `/train` -> same screen as `/training`
 
 ## Architecture
 
@@ -177,8 +176,6 @@ Caddy provides:
 
 ## Known gaps
 
-- Router currently mounts placeholder dictionary/training pages instead of advanced V2 pages.
-- Some UI navigation still points to `/train` while router path is `/training`.
 - Frontend has two API base strategies (`src/lib/api.ts` and `src/api/client.ts`) and should be consolidated.
 
 For deeper technical details, see `AGENTS.md`.

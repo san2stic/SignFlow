@@ -53,36 +53,50 @@ export function TrainPage(): JSX.Element {
   }, [loadUnlabeledVideos]);
 
   return (
-    <div className="container mx-auto px-4 py-6">
-      <TabsWithContext activeTab={activeTab} onTabChange={(tab) => setActiveTab(tab as "record" | "label")}>
-        <Tab value="record">Record</Tab>
-        <Tab value="label" badge={unlabeledVideos.length}>Label Videos</Tab>
+    <section className="space-y-5">
+      <header className="card p-5">
+        <p className="text-xs uppercase tracking-[0.16em] text-text-tertiary">Entrainement</p>
+        <h1 className="mt-2 font-display text-2xl font-semibold text-white">Capture et labeling video</h1>
+        <p className="mt-1 text-sm text-text-secondary">
+          Enregistrez de nouveaux exemples et attribuez rapidement les clips non labels.
+        </p>
+      </header>
+
+      <TabsWithContext
+        activeTab={activeTab}
+        onTabChange={(tab) => setActiveTab(tab as "record" | "label")}
+        className="card p-2"
+      >
+        <Tab value="record">Enregistrer</Tab>
+        <Tab value="label" badge={unlabeledVideos.length}>
+          Labeling
+        </Tab>
       </TabsWithContext>
 
-      <div className="mt-6">
+      <div>
         {activeTab === "record" && (
           <TrainingWizard videoRef={videoRef} cameraRef={attachVideoRef} initialAssignedSign={initialAssignedSign} />
         )}
         {activeTab === "label" && (
           <>
             {isLoading && unlabeledVideos.length === 0 && (
-              <div className="flex items-center justify-center min-h-[400px]">
+              <div className="card flex min-h-[360px] items-center justify-center">
                 <div className="text-center">
-                  <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-primary mx-auto mb-4"></div>
-                  <p className="text-slate-400">Loading videos...</p>
+                  <div className="mx-auto mb-4 h-12 w-12 animate-spin rounded-full border-b-2 border-primary"></div>
+                  <p className="text-sm text-slate-300">Chargement des videos...</p>
                 </div>
               </div>
             )}
 
             {error && (
-              <div className="p-4 bg-red-900/20 border border-red-500/30 rounded text-red-300 mb-4">
-                <p className="font-semibold mb-1">Error loading videos</p>
+              <div className="mb-4 rounded-btn border border-red-500/30 bg-red-900/20 p-4 text-red-300">
+                <p className="mb-1 font-semibold">Erreur de chargement</p>
                 <p className="text-sm">{error}</p>
                 <button
                   onClick={() => loadUnlabeledVideos()}
                   className="mt-2 text-sm underline hover:no-underline"
                 >
-                  Try again
+                  Reessayer
                 </button>
               </div>
             )}
@@ -121,7 +135,7 @@ export function TrainPage(): JSX.Element {
         <SuggestionView
           suggestions={suggestions}
           signName={
-            recentSigns.find((s) => s.id === selectedSignForLabeling)?.name || "this sign"
+            recentSigns.find((s) => s.id === selectedSignForLabeling)?.name || "ce signe"
           }
           onApply={async (videoIds) => {
             await applySuggestions(videoIds, selectedSignForLabeling);
@@ -130,6 +144,6 @@ export function TrainPage(): JSX.Element {
           onSkip={() => clearSuggestions()}
         />
       )}
-    </div>
+    </section>
   );
 }

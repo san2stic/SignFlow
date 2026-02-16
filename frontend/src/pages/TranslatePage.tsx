@@ -288,7 +288,7 @@ export function TranslatePage(): JSX.Element {
     showUnknownPromptRef.current = false;
     clearUnknownPromptTimer();
     resetUnknownPromptState();
-    navigate("/train");
+    navigate("/training");
   };
 
   const addUnknownToTraining = (): void => {
@@ -551,7 +551,7 @@ export function TranslatePage(): JSX.Element {
 
         <button
           className="touch-btn relative overflow-hidden bg-gradient-to-br from-primary to-secondary text-white"
-          onClick={() => navigate("/train")}
+          onClick={() => navigate("/training")}
         >
           <span className="relative z-10 flex items-center justify-center gap-2">
             <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">

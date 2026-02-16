@@ -1,0 +1,6 @@
+artifact_location: file:///app/data/models/mlruns/324040898016677093
+creation_time: 1771247439753
+experiment_id: '324040898016677093'
+last_update_time: 1771247439753
+lifecycle_stage: active
+name: signflow-training

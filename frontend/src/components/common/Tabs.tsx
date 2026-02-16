@@ -30,7 +30,7 @@ export function TabsWithContext({
 }: TabsWithContextProps): JSX.Element {
   return (
     <TabsContext.Provider value={{ activeTab, onTabChange }}>
-      <div className={`flex gap-2 border-b border-slate-700 ${className}`}>
+      <div className={`flex flex-wrap gap-2 border-b border-slate-700/80 ${className}`}>
         {children}
       </div>
     </TabsContext.Provider>
@@ -49,12 +49,13 @@ export function Tab({ value, children, badge }: TabProps): JSX.Element {
 
   return (
     <button
+      type="button"
       onClick={() => onTabChange(value)}
       className={`
-        relative px-4 py-2 font-medium transition-colors
+        relative rounded-btn px-4 py-2.5 text-sm font-medium transition-all
         ${isActive
-          ? "text-primary border-b-2 border-primary"
-          : "text-slate-400 hover:text-slate-300"
+          ? "bg-gradient-to-r from-primary/25 to-secondary/25 text-white ring-1 ring-primary/40"
+          : "text-slate-400 hover:bg-slate-800/70 hover:text-slate-200"
         }
       `}
     >

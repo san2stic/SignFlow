@@ -223,7 +223,7 @@ export function DictionaryPage(): JSX.Element {
 
   const onTrainSign = useCallback(
     (sign: Pick<Sign, "id" | "name" | "training_sample_count" | "video_count">): void => {
-      navigate("/train", {
+      navigate("/training", {
         state: {
           assignedSign: {
             id: sign.id,
@@ -238,15 +238,22 @@ export function DictionaryPage(): JSX.Element {
   );
 
   return (
-    <section className="space-y-4">
-      <header className="flex flex-wrap items-center justify-between gap-2">
-        <h1 className="font-heading text-2xl">Dictionary</h1>
+    <section className="space-y-5">
+      <header className="card flex flex-wrap items-center justify-between gap-3 p-5">
+        <div>
+          <p className="text-xs uppercase tracking-[0.16em] text-text-tertiary">Dictionnaire</p>
+          <h1 className="mt-2 font-display text-2xl font-semibold text-white">Corpus de signes LSFB</h1>
+        </div>
         <div className="flex flex-wrap gap-2">
-          <button className="touch-btn bg-primary text-white" onClick={() => setIsCreateOpen((current) => !current)}>
-            {isCreateOpen ? "Close" : "New Sign"}
+          <button
+            className="touch-btn bg-gradient-to-r from-primary to-secondary text-slate-950"
+            onClick={() => setIsCreateOpen((current) => !current)}
+            aria-label={isCreateOpen ? "Close" : "New Sign"}
+          >
+            {isCreateOpen ? "Fermer" : "Nouveau signe"}
           </button>
-          <label className="touch-btn cursor-pointer bg-slate-700 text-white">
-            {isImporting ? "Importing..." : "Import"}
+          <label className="touch-btn cursor-pointer bg-slate-800 text-white">
+            {isImporting ? "Import..." : "Importer"}
             <input
               type="file"
               className="hidden"
@@ -266,27 +273,27 @@ export function DictionaryPage(): JSX.Element {
       {isCreateOpen && (
         <div className="card grid gap-3 p-4">
           <label className="flex flex-col gap-1 text-sm">
-            Name
+            Nom
             <input
-              className="rounded-btn border border-slate-700 bg-slate-900/60 px-3 py-3 text-base"
+              className="field-input"
               value={draft.name}
               onChange={(event) => setDraft((current) => ({ ...current, name: event.target.value }))}
               placeholder="Bonjour"
             />
           </label>
           <label className="flex flex-col gap-1 text-sm">
-            Category
+            Categorie
             <input
-              className="rounded-btn border border-slate-700 bg-slate-900/60 px-3 py-3 text-base"
+              className="field-input"
               value={draft.category}
               onChange={(event) => setDraft((current) => ({ ...current, category: event.target.value }))}
               placeholder="salutations"
             />
           </label>
           <label className="flex flex-col gap-1 text-sm">
-            Tags (comma separated)
+            Tags (separes par virgule)
             <input
-              className="rounded-btn border border-slate-700 bg-slate-900/60 px-3 py-3 text-base"
+              className="field-input"
               value={draft.tags}
               onChange={(event) => setDraft((current) => ({ ...current, tags: event.target.value }))}
               placeholder="lsfb, v1"
@@ -295,61 +302,61 @@ export function DictionaryPage(): JSX.Element {
           <label className="flex flex-col gap-1 text-sm">
             Description
             <textarea
-              className="h-24 rounded-btn border border-slate-700 bg-slate-900/60 px-3 py-3 text-base"
+              className="field-input h-24"
               value={draft.description}
               onChange={(event) => setDraft((current) => ({ ...current, description: event.target.value }))}
             />
           </label>
-          <button className="touch-btn bg-secondary text-slate-950" onClick={() => void onCreateSign()}>
-            Create Sign
+          <button className="touch-btn bg-gradient-to-r from-secondary to-primary text-slate-950" onClick={() => void onCreateSign()} aria-label="Create Sign">
+            Creer le signe
           </button>
         </div>
       )}
 
       {isOfflineFallback && (
         <div className="card border border-accent/50 bg-accent/10 p-3 text-sm text-accent">
-          Offline fallback enabled: showing last cached dictionary data.
+          Mode hors ligne actif: affichage du dernier cache local.
         </div>
       )}
       {statusMessage && <div className="card border border-secondary/40 bg-secondary/10 p-3 text-sm text-secondary">{statusMessage}</div>}
       {error && <div className="card border border-red-500/40 bg-red-500/10 p-3 text-sm text-red-200">{error}</div>}
 
-      <SearchBar value={query} onChange={setQuery} placeholder="Search signs..." />
+      <SearchBar value={query} onChange={setQuery} placeholder="Rechercher un signe..." />
 
       <div className="flex flex-wrap items-center gap-2">
         <button
-          className={`touch-btn ${view === "graph" ? "bg-primary text-white" : "bg-slate-700 text-slate-200"}`}
+          className={`touch-btn ${view === "graph" ? "bg-gradient-to-r from-primary to-secondary text-slate-950" : "bg-slate-800 text-slate-200"}`}
           onClick={() => setView("graph")}
         >
-          Graph
+          Graphe
         </button>
         <button
-          className={`touch-btn ${view === "cards" ? "bg-primary text-white" : "bg-slate-700 text-slate-200"}`}
+          className={`touch-btn ${view === "cards" ? "bg-gradient-to-r from-primary to-secondary text-slate-950" : "bg-slate-800 text-slate-200"}`}
           onClick={() => setView("cards")}
         >
-          Cards
+          Cartes
         </button>
         <div className="ml-auto flex flex-wrap gap-2">
           <button
-            className="touch-btn bg-slate-700 text-white disabled:opacity-60"
+            className="touch-btn bg-slate-800 text-white disabled:opacity-60"
             disabled={isExporting !== null}
             onClick={() => void onExport("json")}
           >
-            {isExporting === "json" ? "Exporting..." : "Export JSON"}
+            {isExporting === "json" ? "Export..." : "Exporter JSON"}
           </button>
           <button
-            className="touch-btn bg-slate-700 text-white disabled:opacity-60"
+            className="touch-btn bg-slate-800 text-white disabled:opacity-60"
             disabled={isExporting !== null}
             onClick={() => void onExport("markdown")}
           >
-            {isExporting === "markdown" ? "Exporting..." : "Export Markdown"}
+            {isExporting === "markdown" ? "Export..." : "Exporter Markdown"}
           </button>
           <button
-            className="touch-btn bg-slate-700 text-white disabled:opacity-60"
+            className="touch-btn bg-slate-800 text-white disabled:opacity-60"
             disabled={isExporting !== null}
             onClick={() => void onExport("obsidian-vault")}
           >
-            {isExporting === "obsidian-vault" ? "Exporting..." : "Export Obsidian"}
+            {isExporting === "obsidian-vault" ? "Export..." : "Exporter Obsidian"}
           </button>
         </div>
       </div>

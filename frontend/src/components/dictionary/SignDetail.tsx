@@ -98,14 +98,14 @@ export function SignDetail({
       onUpdated?.(payload);
       setIsEditing(false);
     } catch (saveError) {
-      setError(saveError instanceof Error ? saveError.message : "Failed to save sign.");
+      setError(saveError instanceof Error ? saveError.message : "Echec de sauvegarde.");
     } finally {
       setIsSaving(false);
     }
   };
 
   const remove = async (): Promise<void> => {
-    const confirmed = window.confirm(`Delete sign "${sign.name}"?`);
+    const confirmed = window.confirm(`Supprimer le signe "${sign.name}" ?`);
     if (!confirmed) return;
 
     setError(null);
@@ -113,7 +113,7 @@ export function SignDetail({
       await deleteSign(sign.id);
       onDeleted?.(sign.id);
     } catch (deleteError) {
-      setError(deleteError instanceof Error ? deleteError.message : "Failed to delete sign.");
+      setError(deleteError instanceof Error ? deleteError.message : "Echec de suppression.");
     }
   };
 
@@ -121,29 +121,29 @@ export function SignDetail({
     <article className="card space-y-4 p-4">
       <header className="flex flex-wrap items-start justify-between gap-2">
         <div>
-          <h2 className="font-heading text-2xl">{sign.name}</h2>
+          <h2 className="font-heading text-2xl text-white">{sign.name}</h2>
           <p className="text-sm text-slate-400">{(sign.tags ?? []).map((tag) => `#${tag}`).join(" ")}</p>
         </div>
         <div className="flex flex-wrap gap-2">
-          <button className="touch-btn bg-accent text-slate-950" onClick={() => onTrain?.(sign)}>
-            Train
+          <button className="touch-btn bg-gradient-to-r from-accent to-accent-dark text-slate-950" onClick={() => onTrain?.(sign)}>
+            Entrainer
           </button>
           {!isEditing ? (
-            <button className="touch-btn bg-primary text-white" onClick={() => setIsEditing(true)}>
-              Edit
+            <button className="touch-btn bg-gradient-to-r from-primary to-secondary text-slate-950" onClick={() => setIsEditing(true)}>
+              Modifier
             </button>
           ) : (
             <>
               <button className="touch-btn bg-secondary text-slate-950 disabled:opacity-60" disabled={isSaving} onClick={() => void save()}>
-                {isSaving ? "Saving..." : "Save"}
+                {isSaving ? "Sauvegarde..." : "Sauvegarder"}
               </button>
               <button className="touch-btn bg-slate-700 text-white" onClick={() => setIsEditing(false)}>
-                Cancel
+                Annuler
               </button>
             </>
           )}
           <button className="touch-btn bg-red-500 text-white" onClick={() => void remove()}>
-            Delete
+            Supprimer
           </button>
         </div>
       </header>
@@ -151,7 +151,7 @@ export function SignDetail({
       {error && <p className="rounded-btn bg-red-600/20 px-3 py-2 text-sm text-red-200">{error}</p>}
 
       <section>
-        <h3 className="mb-2 font-heading text-lg">Reference Video</h3>
+        <h3 className="mb-2 font-heading text-lg">Video de reference</h3>
         {activeVideo ? (
           <video
             src={`${apiBaseUrl()}/api/v1/media/${activeVideo.id}/stream`}
@@ -159,7 +159,7 @@ export function SignDetail({
             className="w-full rounded-card bg-black"
           />
         ) : (
-          <p className="text-sm text-slate-400">No videos attached yet.</p>
+          <p className="text-sm text-slate-400">Aucune video rattachee.</p>
         )}
       </section>
 
@@ -172,7 +172,7 @@ export function SignDetail({
             onChange={(event) => setDraftDescription(event.target.value)}
           />
         ) : (
-          <ReactMarkdown className="prose prose-invert max-w-none text-sm">{sign.description ?? "No description."}</ReactMarkdown>
+          <ReactMarkdown className="prose prose-invert max-w-none text-sm">{sign.description ?? "Aucune description."}</ReactMarkdown>
         )}
       </section>
 
@@ -188,17 +188,17 @@ export function SignDetail({
       {isEditing && (
         <section className="grid gap-3 sm:grid-cols-2">
           <label className="flex flex-col gap-1 text-sm">
-            Category
+            Categorie
             <input
-              className="rounded-btn border border-slate-700 bg-slate-900/60 px-3 py-2"
+              className="field-input"
               value={draftCategory}
               onChange={(event) => setDraftCategory(event.target.value)}
             />
           </label>
           <label className="flex flex-col gap-1 text-sm">
-            Tags (comma separated)
+            Tags (separes par virgule)
             <input
-              className="rounded-btn border border-slate-700 bg-slate-900/60 px-3 py-2"
+              className="field-input"
               value={draftTags}
               onChange={(event) => setDraftTags(event.target.value)}
             />
@@ -207,9 +207,9 @@ export function SignDetail({
       )}
 
       <section>
-        <h3 className="mb-2 font-heading text-lg">Linked Signs</h3>
+        <h3 className="mb-2 font-heading text-lg">Signes relies</h3>
         {linkedSigns.length === 0 ? (
-          <p className="text-sm text-slate-400">No related signs.</p>
+          <p className="text-sm text-slate-400">Aucun signe relie.</p>
         ) : (
           <div className="flex flex-wrap gap-2">
             {linkedSigns.map((related) => (
@@ -229,7 +229,7 @@ export function SignDetail({
       <section>
         <h3 className="mb-2 font-heading text-lg">Videos ({videos.length})</h3>
         {videos.length === 0 ? (
-          <p className="text-sm text-slate-400">No videos attached yet.</p>
+          <p className="text-sm text-slate-400">Aucune video rattachee.</p>
         ) : (
           <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
             {videos.map((video) => (
@@ -251,10 +251,10 @@ export function SignDetail({
       </section>
 
       <section>
-        <h3 className="mb-2 font-heading text-lg">Stats</h3>
-        <p className="text-sm text-slate-300">Training samples: {sign.training_sample_count}</p>
-        <p className="text-sm text-slate-300">Model accuracy: {Math.round((sign.accuracy ?? 0) * 100)}%</p>
-        <p className="text-sm text-slate-300">Usage count: {sign.usage_count}</p>
+        <h3 className="mb-2 font-heading text-lg">Statistiques</h3>
+        <p className="text-sm text-slate-300">Exemples d entrainement: {sign.training_sample_count}</p>
+        <p className="text-sm text-slate-300">Precision modele: {Math.round((sign.accuracy ?? 0) * 100)}%</p>
+        <p className="text-sm text-slate-300">Nombre d usages: {sign.usage_count}</p>
       </section>
     </article>
   );

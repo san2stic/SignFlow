@@ -1,10 +1,11 @@
 import { FormEvent, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { Hand, Loader2 } from "lucide-react";
-import { useAuthStore } from "../stores/authStore";
-import { api } from "../lib/api";
 
-export default function Login() {
+import { api } from "../lib/api";
+import { useAuthStore } from "../stores/authStore";
+
+export default function Login(): JSX.Element {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
@@ -12,8 +13,8 @@ export default function Login() {
   const navigate = useNavigate();
   const setAuth = useAuthStore((state) => state.setAuth);
 
-  const handleSubmit = async (e: FormEvent) => {
-    e.preventDefault();
+  const handleSubmit = async (event: FormEvent): Promise<void> => {
+    event.preventDefault();
     setError("");
     setLoading(true);
 
@@ -22,139 +23,126 @@ export default function Login() {
       setAuth(response.user, response.access_token);
       navigate("/dashboard");
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Login failed");
+      setError(err instanceof Error ? err.message : "Connexion impossible.");
     } finally {
       setLoading(false);
     }
   };
 
   return (
-    <div className="min-h-screen flex">
-      {/* Left Panel - Hero */}
-      <div className="hidden lg:flex lg:w-1/2 bg-gradient-to-br from-slate-900 via-teal-900 to-slate-900 p-12 flex-col justify-between relative overflow-hidden">
-        <div className="absolute inset-0 opacity-20">
-          <div className="absolute top-20 left-20 w-72 h-72 bg-teal-500 rounded-full blur-3xl"></div>
-          <div className="absolute bottom-20 right-20 w-96 h-96 bg-cyan-500 rounded-full blur-3xl"></div>
-        </div>
-
-        <div className="relative z-10">
-          <div className="flex items-center gap-3 mb-12">
-            <div className="w-12 h-12 bg-gradient-to-br from-teal-400 to-cyan-500 rounded-xl flex items-center justify-center">
-              <Hand className="w-6 h-6 text-white" />
+    <main className="min-h-screen bg-background">
+      <div className="grid min-h-screen lg:grid-cols-[1.15fr_0.85fr]">
+        <section className="relative hidden overflow-hidden border-r border-slate-800/80 p-10 lg:flex lg:flex-col">
+          <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_24%_24%,rgba(20,184,166,0.24),transparent_40%),radial-gradient(circle_at_78%_72%,rgba(6,182,212,0.24),transparent_44%)]" />
+          <div className="relative z-10 flex items-center gap-3">
+            <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-gradient-to-br from-primary to-secondary text-slate-950">
+              <Hand className="h-6 w-6" />
             </div>
-            <span className="text-3xl font-bold text-white">Signflow</span>
+            <div>
+              <p className="font-display text-2xl font-bold text-white">SignFlow</p>
+              <p className="text-sm text-text-secondary">Traduction LSFB en temps reel</p>
+            </div>
           </div>
 
-          <h1 className="text-5xl font-bold text-white mb-6 leading-tight">
-            Bridge languages<br />with your hands
-          </h1>
-          <p className="text-teal-200 text-lg leading-relaxed max-w-md">
-            Real-time sign language translation powered by advanced machine learning.
-            Join thousands breaking communication barriers.
-          </p>
-        </div>
+          <div className="relative z-10 mt-24 max-w-xl space-y-6">
+            <p className="status-chip">Plateforme IA collaborative</p>
+            <h1 className="font-display text-5xl font-semibold leading-tight text-white">
+              Connectez-vous pour traduire, apprendre et deployer plus vite.
+            </h1>
+            <p className="text-base text-text-secondary">
+              Pipeline live, dictionnaire graph, labeling et entrainement few-shot dans une seule interface.
+            </p>
+          </div>
 
-        <div className="relative z-10 grid grid-cols-3 gap-6 text-white">
-          <div>
-            <div className="text-4xl font-bold text-teal-400">98%</div>
-            <div className="text-sm text-teal-200">Accuracy Rate</div>
+          <div className="relative z-10 mt-auto grid grid-cols-3 gap-4">
+            <Metric label="Precision modele" value="94.5%" />
+            <Metric label="Signes suivis" value="1 200+" />
+            <Metric label="Mode live" value="24/7" />
           </div>
-          <div>
-            <div className="text-4xl font-bold text-teal-400">1.2k+</div>
-            <div className="text-sm text-teal-200">Signs Library</div>
-          </div>
-          <div>
-            <div className="text-4xl font-bold text-teal-400">24/7</div>
-            <div className="text-sm text-teal-200">Live Support</div>
-          </div>
-        </div>
-      </div>
+        </section>
 
-      {/* Right Panel - Form */}
-      <div className="flex-1 flex items-center justify-center p-8 bg-slate-50">
-        <div className="w-full max-w-md">
-          <div className="mb-8 lg:hidden">
-            <div className="flex items-center gap-3 justify-center mb-6">
-              <div className="w-10 h-10 bg-gradient-to-br from-teal-400 to-cyan-500 rounded-lg flex items-center justify-center">
-                <Hand className="w-5 h-5 text-white" />
+        <section className="flex items-center justify-center p-5 sm:p-8">
+          <div className="w-full max-w-md space-y-6">
+            <div className="lg:hidden">
+              <div className="flex items-center justify-center gap-3">
+                <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-gradient-to-br from-primary to-secondary text-slate-950">
+                  <Hand className="h-5 w-5" />
+                </div>
+                <p className="font-display text-2xl font-semibold text-white">SignFlow</p>
               </div>
-              <span className="text-2xl font-bold text-slate-900">Signflow</span>
-            </div>
-          </div>
-
-          <div className="mb-8">
-            <h2 className="text-3xl font-bold text-slate-900 mb-2">Welcome back</h2>
-            <p className="text-slate-600">Sign in to your account to continue</p>
-          </div>
-
-          {error && (
-            <div className="mb-6 p-4 bg-red-50 border border-red-200 rounded-xl text-red-700 text-sm">
-              {error}
-            </div>
-          )}
-
-          <form onSubmit={handleSubmit} className="space-y-5">
-            <div>
-              <label htmlFor="email" className="block text-sm font-semibold text-slate-700 mb-2">
-                Email address
-              </label>
-              <input
-                id="email"
-                type="email"
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                className="w-full px-4 py-3 border border-slate-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-teal-500 focus:border-transparent transition-all bg-white text-slate-900"
-                placeholder="you@example.com"
-                required
-                disabled={loading}
-              />
             </div>
 
             <div>
-              <label htmlFor="password" className="block text-sm font-semibold text-slate-700 mb-2">
-                Password
-              </label>
-              <input
-                id="password"
-                type="password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                className="w-full px-4 py-3 border border-slate-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-teal-500 focus:border-transparent transition-all bg-white text-slate-900"
-                placeholder="••••••••"
-                required
-                disabled={loading}
-              />
+              <p className="text-xs uppercase tracking-[0.16em] text-text-tertiary">Authentification</p>
+              <h2 className="mt-2 font-display text-3xl font-semibold text-white">Connexion</h2>
+              <p className="mt-1 text-sm text-text-secondary">Accedez a votre espace de traduction et d entrainement.</p>
             </div>
 
-            <button
-              type="submit"
-              disabled={loading}
-              className="w-full bg-gradient-to-r from-teal-600 to-cyan-600 hover:from-teal-700 hover:to-cyan-700 text-white font-semibold py-3 px-6 rounded-xl transition-all duration-200 shadow-lg hover:shadow-xl disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
-            >
-              {loading ? (
-                <>
-                  <Loader2 className="w-5 h-5 animate-spin" />
-                  Signing in...
-                </>
-              ) : (
-                "Sign in"
-              )}
-            </button>
-          </form>
+            {error && <div className="rounded-btn border border-red-500/40 bg-red-500/10 px-4 py-3 text-sm text-red-200">{error}</div>}
 
-          <div className="mt-6 text-center">
-            <p className="text-slate-600">
-              Don't have an account?{" "}
-              <Link
-                to="/register"
-                className="text-teal-600 hover:text-teal-700 font-semibold transition-colors"
+            <form onSubmit={handleSubmit} className="card space-y-4 p-5">
+              <label className="block space-y-2 text-sm text-text-secondary">
+                <span>Email</span>
+                <input
+                  id="email"
+                  type="email"
+                  value={email}
+                  onChange={(event) => setEmail(event.target.value)}
+                  className="field-input"
+                  placeholder="vous@exemple.com"
+                  required
+                  disabled={loading}
+                />
+              </label>
+
+              <label className="block space-y-2 text-sm text-text-secondary">
+                <span>Mot de passe</span>
+                <input
+                  id="password"
+                  type="password"
+                  value={password}
+                  onChange={(event) => setPassword(event.target.value)}
+                  className="field-input"
+                  placeholder="••••••••"
+                  required
+                  disabled={loading}
+                />
+              </label>
+
+              <button
+                type="submit"
+                disabled={loading}
+                className="touch-btn flex w-full items-center justify-center gap-2 bg-gradient-to-r from-primary to-secondary text-slate-950 disabled:opacity-60"
               >
-                Create one
+                {loading ? (
+                  <>
+                    <Loader2 className="h-5 w-5 animate-spin" />
+                    Connexion...
+                  </>
+                ) : (
+                  "Se connecter"
+                )}
+              </button>
+            </form>
+
+            <p className="text-center text-sm text-text-secondary">
+              Pas encore de compte ?{" "}
+              <Link to="/register" className="font-semibold text-primary-light hover:underline">
+                Creer un compte
               </Link>
             </p>
           </div>
-        </div>
+        </section>
       </div>
+    </main>
+  );
+}
+
+function Metric({ label, value }: { label: string; value: string }): JSX.Element {
+  return (
+    <div className="rounded-btn border border-slate-700/80 bg-slate-900/70 p-3">
+      <p className="text-xs text-text-tertiary">{label}</p>
+      <p className="mt-1 font-display text-xl font-semibold text-white">{value}</p>
     </div>
   );
 }

@@ -9,7 +9,7 @@ export function SearchBar({ value, onChange, placeholder }: SearchBarProps): JSX
     <input
       value={value}
       onChange={(event) => onChange(event.target.value)}
-      className="w-full rounded-btn border border-slate-700 bg-slate-900/60 px-3 py-3 text-base"
+      className="field-input"
       placeholder={placeholder ?? "Search"}
       aria-label="Search"
     />

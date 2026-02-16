@@ -1,9 +1,11 @@
 import { useState } from "react";
-import { useAuthStore } from "../stores/authStore";
-import { User, Mail, Calendar, Shield, Loader2 } from "lucide-react";
-import { api } from "../lib/api";
+import type { LucideIcon } from "lucide-react";
+import { Calendar, Loader2, Mail, Shield, User } from "lucide-react";
 
-export default function Profile() {
+import { api } from "../lib/api";
+import { useAuthStore } from "../stores/authStore";
+
+export default function Profile(): JSX.Element {
   const user = useAuthStore((state) => state.user);
   const token = useAuthStore((state) => state.token);
   const updateUser = useAuthStore((state) => state.updateUser);
@@ -13,23 +15,25 @@ export default function Profile() {
   const [success, setSuccess] = useState("");
   const [formData, setFormData] = useState({
     username: user?.username || "",
-    full_name: user?.full_name || "",
+    full_name: user?.full_name || ""
   });
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const handleSubmit = async (event: React.FormEvent): Promise<void> => {
+    event.preventDefault();
     setError("");
     setSuccess("");
     setLoading(true);
 
     try {
-      if (!token) throw new Error("Not authenticated");
+      if (!token) {
+        throw new Error("Non authentifie");
+      }
       const updatedUser = await api.updateProfile(token, formData);
       updateUser(updatedUser);
-      setSuccess("Profile updated successfully");
+      setSuccess("Profil mis a jour.");
       setEditing(false);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Update failed");
+      setError(err instanceof Error ? err.message : "Mise a jour impossible.");
     } finally {
       setLoading(false);
     }
@@ -37,90 +41,68 @@ export default function Profile() {
 
   if (!user) {
     return (
-      <div className="p-8">
-        <div className="text-center text-slate-600">Loading profile...</div>
+      <div className="card p-5 text-sm text-text-secondary">
+        Chargement du profil...
       </div>
     );
   }
 
   return (
-    <div className="p-8">
-      <div className="mb-8">
-        <h1 className="text-3xl font-bold text-slate-900 mb-2">Profile</h1>
-        <p className="text-slate-600">Manage your account information</p>
-      </div>
+    <section className="space-y-5">
+      <header className="card p-5">
+        <p className="text-xs uppercase tracking-[0.16em] text-text-tertiary">Compte</p>
+        <h1 className="mt-2 font-display text-2xl font-semibold text-white">Profil utilisateur</h1>
+        <p className="mt-1 text-sm text-text-secondary">Gerez vos informations personnelles et etat de compte.</p>
+      </header>
 
-      <div className="max-w-3xl">
-        <div className="bg-white rounded-2xl p-8 border border-gray-200 mb-6">
-          <div className="flex items-center gap-6 mb-8">
-            <div className="w-20 h-20 bg-gradient-to-br from-teal-400 to-cyan-500 rounded-2xl flex items-center justify-center">
-              <User className="w-10 h-10 text-white" />
+      <div className="grid gap-5 lg:grid-cols-[1.1fr_0.9fr]">
+        <article className="card p-5">
+          <div className="mb-6 flex items-center gap-4">
+            <div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-gradient-to-br from-primary to-secondary text-slate-950">
+              <User className="h-8 w-8" />
             </div>
             <div>
-              <h2 className="text-2xl font-bold text-slate-900">{user.username}</h2>
-              <p className="text-slate-600">{user.email}</p>
+              <p className="font-display text-xl font-semibold text-white">{user.username}</p>
+              <p className="text-sm text-text-secondary">{user.email}</p>
             </div>
           </div>
 
-          {error && (
-            <div className="mb-6 p-4 bg-red-50 border border-red-200 rounded-xl text-red-700 text-sm">
-              {error}
-            </div>
-          )}
+          {error && <div className="mb-4 rounded-btn border border-red-500/40 bg-red-500/10 px-4 py-3 text-sm text-red-200">{error}</div>}
+          {success && <div className="mb-4 rounded-btn border border-emerald-500/40 bg-emerald-500/10 px-4 py-3 text-sm text-emerald-200">{success}</div>}
 
-          {success && (
-            <div className="mb-6 p-4 bg-green-50 border border-green-200 rounded-xl text-green-700 text-sm">
-              {success}
-            </div>
-          )}
+          <form onSubmit={handleSubmit} className="space-y-4">
+            <label className="block space-y-2 text-sm text-text-secondary">
+              <span>Nom utilisateur</span>
+              <input
+                type="text"
+                value={formData.username}
+                onChange={(event) => setFormData({ ...formData, username: event.target.value })}
+                disabled={!editing || loading}
+                className="field-input disabled:cursor-not-allowed disabled:opacity-60"
+              />
+            </label>
 
-          <form onSubmit={handleSubmit} className="space-y-6">
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-              <div>
-                <label className="block text-sm font-semibold text-slate-700 mb-2">
-                  Username
-                </label>
-                <input
-                  type="text"
-                  value={formData.username}
-                  onChange={(e) => setFormData({ ...formData, username: e.target.value })}
-                  disabled={!editing || loading}
-                  className="w-full px-4 py-3 border border-slate-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-teal-500 disabled:bg-gray-50 disabled:text-slate-500"
-                />
-              </div>
+            <label className="block space-y-2 text-sm text-text-secondary">
+              <span>Nom complet</span>
+              <input
+                type="text"
+                value={formData.full_name}
+                onChange={(event) => setFormData({ ...formData, full_name: event.target.value })}
+                disabled={!editing || loading}
+                className="field-input disabled:cursor-not-allowed disabled:opacity-60"
+              />
+            </label>
 
-              <div>
-                <label className="block text-sm font-semibold text-slate-700 mb-2">
-                  Full Name
-                </label>
-                <input
-                  type="text"
-                  value={formData.full_name}
-                  onChange={(e) => setFormData({ ...formData, full_name: e.target.value })}
-                  disabled={!editing || loading}
-                  className="w-full px-4 py-3 border border-slate-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-teal-500 disabled:bg-gray-50 disabled:text-slate-500"
-                />
-              </div>
-            </div>
-
-            <div className="flex gap-3">
+            <div className="flex flex-wrap gap-2">
               {!editing ? (
-                <button
-                  type="button"
-                  onClick={() => setEditing(true)}
-                  className="px-6 py-3 bg-gradient-to-r from-teal-600 to-cyan-600 text-white font-semibold rounded-xl hover:from-teal-700 hover:to-cyan-700 transition-all"
-                >
-                  Edit Profile
+                <button type="button" onClick={() => setEditing(true)} className="touch-btn bg-gradient-to-r from-primary to-secondary text-slate-950">
+                  Modifier le profil
                 </button>
               ) : (
                 <>
-                  <button
-                    type="submit"
-                    disabled={loading}
-                    className="px-6 py-3 bg-gradient-to-r from-teal-600 to-cyan-600 text-white font-semibold rounded-xl hover:from-teal-700 hover:to-cyan-700 transition-all disabled:opacity-50 flex items-center gap-2"
-                  >
-                    {loading && <Loader2 className="w-4 h-4 animate-spin" />}
-                    Save Changes
+                  <button type="submit" disabled={loading} className="touch-btn flex items-center gap-2 bg-gradient-to-r from-primary to-secondary text-slate-950 disabled:opacity-60">
+                    {loading && <Loader2 className="h-4 w-4 animate-spin" />}
+                    Enregistrer
                   </button>
                   <button
                     type="button"
@@ -128,52 +110,40 @@ export default function Profile() {
                       setEditing(false);
                       setFormData({
                         username: user.username,
-                        full_name: user.full_name || "",
+                        full_name: user.full_name || ""
                       });
                       setError("");
                       setSuccess("");
                     }}
                     disabled={loading}
-                    className="px-6 py-3 border border-slate-300 text-slate-700 font-semibold rounded-xl hover:bg-slate-50 transition-all"
+                    className="touch-btn bg-slate-800 text-white"
                   >
-                    Cancel
+                    Annuler
                   </button>
                 </>
               )}
             </div>
           </form>
-        </div>
+        </article>
 
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-          <div className="bg-white rounded-xl p-6 border border-gray-200">
-            <div className="w-10 h-10 bg-teal-100 rounded-lg flex items-center justify-center mb-3">
-              <Mail className="w-5 h-5 text-teal-600" />
-            </div>
-            <p className="text-sm text-slate-600 mb-1">Email</p>
-            <p className="font-semibold text-slate-900">{user.email}</p>
-          </div>
-
-          <div className="bg-white rounded-xl p-6 border border-gray-200">
-            <div className="w-10 h-10 bg-cyan-100 rounded-lg flex items-center justify-center mb-3">
-              <Calendar className="w-5 h-5 text-cyan-600" />
-            </div>
-            <p className="text-sm text-slate-600 mb-1">Member Since</p>
-            <p className="font-semibold text-slate-900">
-              {new Date(user.created_at).toLocaleDateString()}
-            </p>
-          </div>
-
-          <div className="bg-white rounded-xl p-6 border border-gray-200">
-            <div className="w-10 h-10 bg-purple-100 rounded-lg flex items-center justify-center mb-3">
-              <Shield className="w-5 h-5 text-purple-600" />
-            </div>
-            <p className="text-sm text-slate-600 mb-1">Account Status</p>
-            <p className="font-semibold text-slate-900">
-              {user.is_active ? "Active" : "Inactive"}
-            </p>
-          </div>
-        </div>
+        <aside className="space-y-3">
+          <InfoCard icon={Mail} label="Email" value={user.email} />
+          <InfoCard icon={Calendar} label="Membre depuis" value={new Date(user.created_at).toLocaleDateString("fr-FR")} />
+          <InfoCard icon={Shield} label="Statut du compte" value={user.is_active ? "Actif" : "Inactif"} />
+        </aside>
       </div>
+    </section>
+  );
+}
+
+function InfoCard({ icon: Icon, label, value }: { icon: LucideIcon; label: string; value: string }): JSX.Element {
+  return (
+    <div className="card p-4">
+      <div className="mb-3 flex h-10 w-10 items-center justify-center rounded-lg bg-gradient-to-br from-primary/20 to-secondary/20 text-primary-light">
+        <Icon className="h-5 w-5" />
+      </div>
+      <p className="text-xs text-text-tertiary">{label}</p>
+      <p className="mt-1 text-sm font-semibold text-white">{value}</p>
     </div>
   );
 }
