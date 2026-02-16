@@ -194,6 +194,33 @@ class SignFlowInferencePipeline:
         self.labels = aligned
         logger.debug("labels_set", num_labels=len(self.labels))
 
+    def spawn_session(self) -> SignFlowInferencePipeline:
+        """Create an isolated per-session pipeline sharing only immutable runtime artifacts."""
+        session_pipeline = SignFlowInferencePipeline(
+            model_path=None,
+            seq_len=self.seq_len,
+            confidence_threshold=self.confidence_threshold,
+            smoothing_window=int(self.prediction_history.maxlen or 5),
+            min_hand_visibility=self.min_hand_visibility,
+            min_prediction_margin=self.min_prediction_margin,
+            min_motion_energy=self.min_motion_energy,
+            device=str(self.device),
+            max_buffer_frames=self.max_buffer_frames,
+            rest_frames_threshold=self.rest_frames_threshold,
+            motion_start_threshold=self.motion_start_threshold,
+            min_recording_frames=self.min_recording_frames,
+            pre_roll_frames=self.pre_roll_frames,
+            frontend_confidence_floor=self.frontend_confidence_floor,
+            inference_num_views=self.inference_num_views,
+            inference_temperature=self.inference_temperature,
+            max_view_disagreement=self.max_view_disagreement,
+            calibration_temperature=self.calibration_temperature,
+            class_thresholds=dict(self.class_thresholds),
+        )
+        session_pipeline.model = self.model
+        session_pipeline.set_labels(list(self.labels))
+        return session_pipeline
+
     def process_frame(self, payload: dict) -> Prediction:
         """Process a landmarks frame through the state machine."""
         frame = FrameLandmarks(

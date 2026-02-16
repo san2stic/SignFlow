@@ -41,6 +41,10 @@ logger = structlog.get_logger(__name__)
 class TrainingService:
     """Creates and tracks training sessions; runs CPU-friendly training workers."""
 
+    _DEFAULT_ECE_GATE: float = 0.12
+    _CONFUSION_MAX_CLASSES: int = 20
+    _WEAKEST_CLASSES_TOP_K: int = 5
+
     def __init__(self) -> None:
         self._stop_flags: dict[str, bool] = {}
         self._lock = threading.Lock()
@@ -620,6 +624,299 @@ class TrainingService:
         }
 
     @staticmethod
+    def _compute_ece(
+        *,
+        probs: np.ndarray,
+        y_true: np.ndarray,
+        n_bins: int = 15,
+    ) -> float | None:
+        """Compute Expected Calibration Error (ECE) from probabilities and true labels."""
+        if probs.ndim != 2 or probs.size == 0 or y_true.size == 0:
+            return None
+
+        sample_count = min(int(probs.shape[0]), int(y_true.shape[0]))
+        if sample_count <= 0:
+            return None
+
+        probs = probs[:sample_count]
+        y_true = y_true[:sample_count]
+
+        num_classes = int(probs.shape[1])
+        if num_classes <= 0:
+            return None
+
+        valid_mask = (y_true >= 0) & (y_true < num_classes)
+        if int(np.sum(valid_mask)) == 0:
+            return None
+
+        probs = probs[valid_mask]
+        y_true = y_true[valid_mask]
+
+        confidences = np.max(probs, axis=1)
+        predictions = np.argmax(probs, axis=1)
+        accuracies = (predictions == y_true).astype(np.float32)
+
+        bins = np.linspace(0.0, 1.0, num=max(2, int(n_bins)) + 1)
+        ece = 0.0
+        total = float(confidences.shape[0])
+        for index in range(len(bins) - 1):
+            start = float(bins[index])
+            end = float(bins[index + 1])
+            if index == len(bins) - 2:
+                mask = (confidences >= start) & (confidences <= end)
+            else:
+                mask = (confidences >= start) & (confidences < end)
+
+            count = int(np.sum(mask))
+            if count == 0:
+                continue
+
+            confidence_mean = float(np.mean(confidences[mask]))
+            accuracy_mean = float(np.mean(accuracies[mask]))
+            weight = count / max(1.0, total)
+            ece += abs(accuracy_mean - confidence_mean) * weight
+
+        return float(np.clip(ece, 0.0, 1.0))
+
+    @staticmethod
+    def _label_name_for_index(class_labels: list[str], class_index: int) -> str:
+        """Resolve display label for class index with safe fallback."""
+        if 0 <= int(class_index) < len(class_labels):
+            return str(class_labels[int(class_index)])
+        return f"class_{int(class_index)}"
+
+    @staticmethod
+    def _compute_compact_confusion_matrix(
+        *,
+        y_true: np.ndarray,
+        y_pred: np.ndarray,
+        class_labels: list[str],
+        max_classes: int = 20,
+    ) -> dict[str, object]:
+        """Build compact JSON-serializable confusion matrix with class support."""
+        if y_true.size == 0 or y_pred.size == 0:
+            return {
+                "labels": [],
+                "matrix": [],
+                "support": [],
+                "truncated": False,
+            }
+
+        sample_count = min(int(y_true.shape[0]), int(y_pred.shape[0]))
+        y_true = y_true[:sample_count]
+        y_pred = y_pred[:sample_count]
+
+        inferred_classes = int(max(int(np.max(y_true)), int(np.max(y_pred))) + 1)
+        num_classes = max(len(class_labels), inferred_classes)
+        if num_classes <= 0:
+            return {
+                "labels": [],
+                "matrix": [],
+                "support": [],
+                "truncated": False,
+            }
+
+        valid_true = (y_true >= 0) & (y_true < num_classes)
+        valid_pred = (y_pred >= 0) & (y_pred < num_classes)
+        paired_valid = valid_true & valid_pred
+        if int(np.sum(paired_valid)) == 0:
+            return {
+                "labels": [],
+                "matrix": [],
+                "support": [],
+                "truncated": False,
+            }
+
+        y_true_valid = y_true[paired_valid]
+        y_pred_valid = y_pred[paired_valid]
+
+        true_support = np.bincount(y_true_valid, minlength=num_classes)
+        present_indices = sorted(
+            set(int(value) for value in y_true_valid.tolist())
+            | set(int(value) for value in y_pred_valid.tolist())
+        )
+
+        truncated = False
+        max_kept = max(1, int(max_classes))
+        if len(present_indices) > max_kept:
+            ranked = sorted(
+                present_indices,
+                key=lambda idx: (-int(true_support[idx]), idx),
+            )
+            selected_indices = sorted(ranked[:max_kept])
+            truncated = True
+        else:
+            selected_indices = present_indices
+
+        index_map = {original: reduced for reduced, original in enumerate(selected_indices)}
+        matrix = np.zeros((len(selected_indices), len(selected_indices)), dtype=np.int64)
+        selected_sample_count = 0
+        for truth, pred in zip(y_true_valid.tolist(), y_pred_valid.tolist()):
+            mapped_truth = index_map.get(int(truth))
+            mapped_pred = index_map.get(int(pred))
+            if mapped_truth is None or mapped_pred is None:
+                continue
+            matrix[mapped_truth, mapped_pred] += 1
+            selected_sample_count += 1
+
+        labels = [
+            TrainingService._label_name_for_index(class_labels, class_index)
+            for class_index in selected_indices
+        ]
+        support = [int(true_support[class_index]) for class_index in selected_indices]
+
+        return {
+            "labels": labels,
+            "matrix": matrix.tolist(),
+            "support": support,
+            "truncated": truncated,
+            "selected_samples": int(selected_sample_count),
+            "total_samples": int(sample_count),
+        }
+
+    @staticmethod
+    def _compute_per_class_metrics(
+        *,
+        y_true: np.ndarray,
+        y_pred: np.ndarray,
+        class_labels: list[str],
+    ) -> list[dict[str, float | int | str]]:
+        """Compute per-class precision/recall/f1/support with robust fallbacks."""
+        if y_true.size == 0 or y_pred.size == 0:
+            return []
+
+        sample_count = min(int(y_true.shape[0]), int(y_pred.shape[0]))
+        y_true = y_true[:sample_count]
+        y_pred = y_pred[:sample_count]
+
+        inferred_classes = int(max(int(np.max(y_true)), int(np.max(y_pred))) + 1)
+        num_classes = max(len(class_labels), inferred_classes)
+        if num_classes <= 0:
+            return []
+
+        valid_true = (y_true >= 0) & (y_true < num_classes)
+        valid_pred = (y_pred >= 0) & (y_pred < num_classes)
+        paired_valid = valid_true & valid_pred
+        if int(np.sum(paired_valid)) == 0:
+            return []
+
+        y_true_valid = y_true[paired_valid]
+        y_pred_valid = y_pred[paired_valid]
+
+        present_indices = sorted(
+            set(int(value) for value in y_true_valid.tolist())
+            | set(int(value) for value in y_pred_valid.tolist())
+        )
+
+        metrics: list[dict[str, float | int | str]] = []
+        for class_index in present_indices:
+            tp = int(np.sum((y_true_valid == class_index) & (y_pred_valid == class_index)))
+            fp = int(np.sum((y_true_valid != class_index) & (y_pred_valid == class_index)))
+            fn = int(np.sum((y_true_valid == class_index) & (y_pred_valid != class_index)))
+            support = int(np.sum(y_true_valid == class_index))
+
+            precision = tp / max(1, tp + fp)
+            recall = tp / max(1, tp + fn)
+            f1 = (2.0 * precision * recall / (precision + recall)) if (precision + recall) > 0 else 0.0
+
+            metrics.append(
+                {
+                    "label": TrainingService._label_name_for_index(class_labels, class_index),
+                    "index": int(class_index),
+                    "precision": round(float(precision), 4),
+                    "recall": round(float(recall), 4),
+                    "f1": round(float(f1), 4),
+                    "support": support,
+                }
+            )
+
+        return metrics
+
+    @staticmethod
+    def _extract_weakest_classes(
+        per_class_metrics: list[dict[str, float | int | str]],
+        *,
+        top_k: int = 5,
+    ) -> list[dict[str, float | int | str]]:
+        """Return top-k weakest classes by F1 among supported classes."""
+        supported = [item for item in per_class_metrics if int(item.get("support", 0)) > 0]
+        ranked = sorted(
+            supported,
+            key=lambda item: (
+                float(item.get("f1", 0.0)),
+                float(item.get("recall", 0.0)),
+                -int(item.get("support", 0)),
+                str(item.get("label", "")),
+            ),
+        )
+        return ranked[: max(1, int(top_k))]
+
+    @staticmethod
+    def _build_eval_report(
+        *,
+        y_true: np.ndarray,
+        y_pred: np.ndarray,
+        probs: np.ndarray,
+        class_labels: list[str],
+        target_label: str | None,
+        none_label: str = "[NONE]",
+    ) -> dict[str, object]:
+        """Build complete validation report with calibration and class-wise diagnostics."""
+        eval_metrics = TrainingService._compute_eval_metrics(
+            y_true=y_true,
+            y_pred=y_pred,
+            class_labels=class_labels,
+            target_label=target_label,
+            none_label=none_label,
+        )
+        ece = TrainingService._compute_ece(probs=probs, y_true=y_true)
+        per_class_metrics = TrainingService._compute_per_class_metrics(
+            y_true=y_true,
+            y_pred=y_pred,
+            class_labels=class_labels,
+        )
+        return {
+            "macro_f1": round(float(eval_metrics.get("macro_f1") or 0.0), 4),
+            "target_sign_f1": (
+                round(float(eval_metrics["target_sign_f1"]), 4)
+                if eval_metrics.get("target_sign_f1") is not None
+                else None
+            ),
+            "open_set_fpr": (
+                round(float(eval_metrics["open_set_fpr"]), 4)
+                if eval_metrics.get("open_set_fpr") is not None
+                else None
+            ),
+            "ece": round(float(ece), 4) if ece is not None else None,
+            "confusion_matrix": TrainingService._compute_compact_confusion_matrix(
+                y_true=y_true,
+                y_pred=y_pred,
+                class_labels=class_labels,
+                max_classes=TrainingService._CONFUSION_MAX_CLASSES,
+            ),
+            "per_class_metrics": per_class_metrics,
+            "weakest_classes": TrainingService._extract_weakest_classes(
+                per_class_metrics,
+                top_k=TrainingService._WEAKEST_CLASSES_TOP_K,
+            ),
+        }
+
+    @staticmethod
+    def _build_artifact_metadata(
+        *,
+        class_thresholds: dict[str, float],
+        calibration_temperature: float,
+        eval_report: dict[str, object],
+    ) -> dict[str, object]:
+        """Build artifact metadata persisted with model checkpoints and DB versions."""
+        return {
+            "class_thresholds": class_thresholds,
+            "calibration": {"temperature": calibration_temperature},
+            "calibration_temperature": calibration_temperature,
+            "eval_report": eval_report,
+        }
+
+    @staticmethod
     def _estimate_latency_p95_ms(
         *,
         model: SignTransformer,
@@ -658,12 +955,15 @@ class TrainingService:
         target_sign_f1: float | None,
         open_set_fpr: float | None,
         latency_p95_ms: float,
+        ece: float | None = None,
     ) -> bool:
         """Evaluate multi-metric deployment gate."""
         macro_gate = float(config.get("macro_f1_gate", 0.82))
         target_gate = float(config.get("target_sign_f1_gate", 0.85))
         open_set_gate = float(config.get("open_set_fpr_gate", 0.05))
         latency_gate = float(config.get("latency_p95_ms_gate", 120.0))
+        ece_gate = float(config.get("ece_gate", TrainingService._DEFAULT_ECE_GATE))
+        ece_gate = float(np.clip(ece_gate, 0.0, 1.0))
 
         if macro_f1 < macro_gate:
             return False
@@ -673,6 +973,8 @@ class TrainingService:
         if open_set_fpr is not None and open_set_fpr > open_set_gate:
             return False
         if latency_p95_ms > latency_gate:
+            return False
+        if ece is not None and ece > ece_gate:
             return False
         return True
 
@@ -691,6 +993,7 @@ class TrainingService:
         open_set_fpr: float | None = None,
         latency_p95_ms: float | None = None,
         calibration_temperature: float | None = None,
+        ece: float | None = None,
         deployment_gate_passed: bool = False,
         recommended_next_action: str = "wait",
     ) -> dict:
@@ -714,6 +1017,7 @@ class TrainingService:
                 if calibration_temperature is not None
                 else None
             ),
+            "ece": round(float(ece), 4) if ece is not None else None,
             "deployment_gate_passed": bool(deployment_gate_passed),
             "recommended_next_action": recommended_next_action,
         }
@@ -1361,21 +1665,27 @@ class TrainingService:
                 )
 
                 target_sign_slug = slug_by_id.get(sign_id) if sign_id else None
-                eval_metrics = self._compute_eval_metrics(
+                model_eval_report = self._build_eval_report(
                     y_true=eval_labels,
                     y_pred=decoded,
+                    probs=probs,
                     class_labels=class_labels,
                     target_label=target_sign_slug,
                 )
-                macro_f1 = float(eval_metrics.get("macro_f1") or 0.0)
+                macro_f1 = float(model_eval_report.get("macro_f1") or 0.0)
                 target_sign_f1 = (
-                    float(eval_metrics["target_sign_f1"])
-                    if eval_metrics.get("target_sign_f1") is not None
+                    float(model_eval_report["target_sign_f1"])
+                    if model_eval_report.get("target_sign_f1") is not None
                     else None
                 )
                 open_set_fpr = (
-                    float(eval_metrics["open_set_fpr"])
-                    if eval_metrics.get("open_set_fpr") is not None
+                    float(model_eval_report["open_set_fpr"])
+                    if model_eval_report.get("open_set_fpr") is not None
+                    else None
+                )
+                ece = (
+                    float(model_eval_report["ece"])
+                    if model_eval_report.get("ece") is not None
                     else None
                 )
                 latency_p95_ms = self._estimate_latency_p95_ms(
@@ -1390,29 +1700,20 @@ class TrainingService:
                     target_sign_f1=target_sign_f1,
                     open_set_fpr=open_set_fpr,
                     latency_p95_ms=latency_p95_ms,
+                    ece=ece,
                 )
+                model_eval_report["latency_p95_ms"] = round(float(latency_p95_ms), 2)
+                model_eval_report["deployment_gate_passed"] = bool(deployment_ready)
 
-                model_eval_report = {
-                    "macro_f1": round(macro_f1, 4),
-                    "target_sign_f1": round(float(target_sign_f1), 4)
-                    if target_sign_f1 is not None
-                    else None,
-                    "open_set_fpr": round(float(open_set_fpr), 4)
-                    if open_set_fpr is not None
-                    else None,
-                    "latency_p95_ms": round(float(latency_p95_ms), 2),
-                    "deployment_gate_passed": bool(deployment_ready),
-                }
-
-                runtime_metadata = {
-                    "class_thresholds": class_thresholds,
-                    "calibration_temperature": calibration_temperature,
-                    "eval_report": model_eval_report,
-                }
+                artifact_metadata = self._build_artifact_metadata(
+                    class_thresholds=class_thresholds,
+                    calibration_temperature=calibration_temperature,
+                    eval_report=model_eval_report,
+                )
                 trainer.save_model(
                     model_file,
                     class_labels=class_labels,
-                    metadata=runtime_metadata,
+                    metadata=artifact_metadata,
                 )
 
                 logger.info("model_saved", path=str(model_file), version=version)
@@ -1428,11 +1729,7 @@ class TrainingService:
                     num_classes=num_classes,
                     accuracy=final_accuracy,
                     class_labels=class_labels,
-                    artifact_metadata={
-                        "class_thresholds": class_thresholds,
-                        "calibration": {"temperature": calibration_temperature},
-                        "eval_report": model_eval_report,
-                    },
+                    artifact_metadata=artifact_metadata,
                     training_session_id=session.id,
                     file_path=str(model_file),
                     file_size_mb=round(model_file.stat().st_size / 1_048_576, 4),
@@ -1457,6 +1754,7 @@ class TrainingService:
                     open_set_fpr=open_set_fpr,
                     latency_p95_ms=latency_p95_ms,
                     calibration_temperature=calibration_temperature,
+                    ece=ece,
                     deployment_gate_passed=deployment_ready,
                     recommended_next_action=next_action,
                 )

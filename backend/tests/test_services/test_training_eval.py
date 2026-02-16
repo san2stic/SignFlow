@@ -82,3 +82,92 @@ def test_deployment_gate_requires_all_thresholds() -> None:
 
     assert ok is True
     assert not_ok is False
+
+
+def test_compute_ece_returns_expected_value() -> None:
+    """ECE helper should compute weighted calibration gap across bins."""
+    probs = np.array(
+        [
+            [0.90, 0.10],
+            [0.90, 0.10],
+            [0.60, 0.40],
+            [0.40, 0.60],
+        ],
+        dtype=np.float32,
+    )
+    y_true = np.array([0, 1, 1, 0], dtype=np.int64)
+
+    ece = TrainingService._compute_ece(probs=probs, y_true=y_true, n_bins=2)
+
+    assert ece is not None
+    assert abs(ece - 0.5) < 1e-6
+
+
+def test_eval_report_contains_new_quality_fields() -> None:
+    """Evaluation report should include ECE, confusion matrix and class-wise diagnostics."""
+    y_true = np.array([0, 1, 1, 0, 1], dtype=np.int64)
+    y_pred = np.array([0, 1, 0, 0, 1], dtype=np.int64)
+    probs = np.array(
+        [
+            [0.90, 0.10],
+            [0.10, 0.90],
+            [0.60, 0.40],
+            [0.55, 0.45],
+            [0.20, 0.80],
+        ],
+        dtype=np.float32,
+    )
+
+    report = TrainingService._build_eval_report(
+        y_true=y_true,
+        y_pred=y_pred,
+        probs=probs,
+        class_labels=["[NONE]", "lsfb_bonjour"],
+        target_label="lsfb_bonjour",
+    )
+
+    assert "ece" in report
+    assert "confusion_matrix" in report
+    assert "per_class_metrics" in report
+    assert "weakest_classes" in report
+    confusion = report["confusion_matrix"]
+    assert isinstance(confusion, dict)
+    assert confusion["labels"] == ["[NONE]", "lsfb_bonjour"]
+    assert confusion["support"] == [2, 3]
+    assert confusion["matrix"] == [[2, 0], [1, 2]]
+    per_class = report["per_class_metrics"]
+    assert isinstance(per_class, list)
+    assert len(per_class) == 2
+
+
+def test_deployment_gate_rejects_high_ece() -> None:
+    """Deployment gate should reject models that exceed configured ECE threshold."""
+    config = {
+        "macro_f1_gate": 0.82,
+        "target_sign_f1_gate": 0.85,
+        "open_set_fpr_gate": 0.05,
+        "latency_p95_ms_gate": 120.0,
+        "ece_gate": 0.10,
+    }
+
+    ok = TrainingService._passes_deployment_gate(
+        mode="few-shot",
+        config=config,
+        macro_f1=0.9,
+        target_sign_f1=0.9,
+        open_set_fpr=0.02,
+        latency_p95_ms=80.0,
+        ece=0.08,
+    )
+    not_ok = TrainingService._passes_deployment_gate(
+        mode="few-shot",
+        config=config,
+        macro_f1=0.9,
+        target_sign_f1=0.9,
+        open_set_fpr=0.02,
+        latency_p95_ms=80.0,
+        ece=0.15,
+    )
+
+    assert ok is True
+    assert not_ok is False

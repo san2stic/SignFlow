@@ -24,7 +24,7 @@ from app.models.sign import Sign
 router = APIRouter()
 logger = structlog.get_logger(__name__)
 
-# Global pipeline instance (loaded once at startup)
+# Global pipeline template (loaded once at startup; per-connection state is isolated)
 _global_pipeline: SignFlowInferencePipeline | None = None
 _TOKEN_RE = re.compile(r"[a-zA-Z0-9_-]+")
 
@@ -90,7 +90,7 @@ def _increment_usage_counts(tokens: list[str]) -> None:
 
 def get_or_create_pipeline() -> SignFlowInferencePipeline:
     """
-    Get or create the global inference pipeline with active model.
+    Get or create the global inference pipeline template with active model.
 
     Returns:
         Initialized SignFlowInferencePipeline
@@ -100,7 +100,7 @@ def get_or_create_pipeline() -> SignFlowInferencePipeline:
     if _global_pipeline is not None:
         return _global_pipeline
 
-    logger.info("initializing_global_pipeline")
+    logger.info("initializing_global_pipeline_template")
     settings = get_settings()
 
     # Get active model from database
@@ -157,7 +157,7 @@ def get_or_create_pipeline() -> SignFlowInferencePipeline:
             )
             pipeline.set_labels(labels)
 
-            logger.info("pipeline_initialized", num_labels=len(labels))
+            logger.info("pipeline_template_initialized", num_labels=len(labels))
         else:
             logger.warning("no_active_model_found_using_fallback")
             # Create pipeline without model (will return NONE predictions)
@@ -223,15 +223,16 @@ async def translate_stream(websocket: WebSocket) -> None:
 
     await websocket.accept()
 
-    # Get global pipeline (with active model loaded)
+    # Build an isolated per-connection pipeline from the shared template.
     try:
-        pipeline = get_or_create_pipeline()
+        pipeline_template = get_or_create_pipeline()
+        pipeline = pipeline_template.spawn_session()
     except Exception as e:
         logger.error("failed_to_get_pipeline", error=str(e))
         await websocket.close(code=1011, reason="Failed to initialize inference pipeline")
         return
 
-    # Reset pipeline state for this session
+    # Ensure clean session state (defensive, spawn_session already isolates state).
     pipeline.reset()
 
     frame_count = 0
