@@ -1,0 +1,72 @@
+# Dockerfile multi-platform pour TorchServe avec support CPU/MPS/GPU
+FROM python:3.11-slim
+
+# Arguments de build pour platform detection
+ARG TARGETPLATFORM
+ARG BUILDPLATFORM
+
+# Installation des dépendances système
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    default-jdk \
+    curl \
+    wget \
+    git \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+# Configurer JAVA_HOME (default-jdk crée automatiquement /usr/lib/jvm/default-java)
+ENV JAVA_HOME=/usr/lib/jvm/default-java
+ENV PATH=$JAVA_HOME/bin:$PATH
+
+# Installation de PyTorch selon la plateforme
+RUN if [ "$TARGETPLATFORM" = "linux/arm64" ]; then \
+        # Apple Silicon / ARM64 - CPU et MPS support
+        pip install --no-cache-dir torch==2.2.0 torchvision==0.17.0 torchaudio==2.2.0; \
+    elif [ "$TARGETPLATFORM" = "linux/amd64" ]; then \
+        # x86_64 - CPU et CUDA support
+        pip install --no-cache-dir torch==2.2.0 torchvision==0.17.0 torchaudio==2.2.0 \
+            --index-url https://download.pytorch.org/whl/cu121; \
+    else \
+        # Fallback: CPU-only
+        pip install --no-cache-dir torch==2.2.0 torchvision==0.17.0 torchaudio==2.2.0; \
+    fi
+
+# Installation de TorchServe et dépendances
+RUN pip install --no-cache-dir \
+    torchserve==0.9.0 \
+    torch-model-archiver==0.9.0 \
+    torch-workflow-archiver==0.2.13 \
+    pillow \
+    future \
+    psutil \
+    prometheus-client
+
+# Installation des dépendances ML du projet
+RUN pip install --no-cache-dir \
+    numpy==1.26.4 \
+    onnx==1.15.0 \
+    onnxruntime==1.17.0
+
+# Création des répertoires TorchServe
+RUN mkdir -p /home/model-server/model-store \
+    /home/model-server/config \
+    /home/model-server/logs
+
+# Configuration par défaut
+COPY torchserve/config/config.properties /home/model-server/config/config.properties
+
+# Utilisateur non-root pour sécurité
+RUN useradd -m -u 1000 model-server && \
+    chown -R model-server:model-server /home/model-server
+
+USER model-server
+WORKDIR /home/model-server
+
+# Ports TorchServe
+EXPOSE 8080 8081 8082
+
+# Script de démarrage avec détection de device
+COPY --chown=model-server:model-server torchserve/start.sh /home/model-server/start.sh
+RUN chmod +x /home/model-server/start.sh
+
+CMD ["/home/model-server/start.sh"]

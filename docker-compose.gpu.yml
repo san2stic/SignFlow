@@ -1,0 +1,21 @@
+# docker-compose override pour x86_64 avec NVIDIA GPU
+# Usage: docker-compose -f docker-compose.yml -f docker-compose.gpu.yml up
+
+services:
+  torchserve:
+    platform: linux/amd64
+    environment:
+      - TORCH_DEVICE=cuda
+      - TS_NUMBER_OF_GPU=1
+    deploy:
+      resources:
+        limits:
+          memory: 8G
+          cpus: '4.0'
+        reservations:
+          memory: 4G
+          devices:
+            - driver: nvidia
+              capabilities: [gpu]
+              count: 1
+    runtime: nvidia  # NVIDIA Container Runtime

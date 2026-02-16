@@ -1,0 +1,16 @@
+# docker-compose override pour Apple Silicon (ARM64)
+# Usage: docker-compose -f docker-compose.yml -f docker-compose.arm64.yml up
+
+services:
+  torchserve:
+    platform: linux/arm64
+    environment:
+      - TORCH_DEVICE=mps  # Force MPS si disponible
+      - TS_NUMBER_OF_GPU=0
+    deploy:
+      resources:
+        limits:
+          memory: 6G
+          cpus: '3.0'
+        reservations:
+          memory: 2G

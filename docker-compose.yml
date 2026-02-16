@@ -91,7 +91,10 @@ services:
       - MLFLOW_TRACKING_URI=file:///mlflow/mlruns
 
   torchserve:
-    image: pytorch/torchserve:latest-gpu
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.torchserve
+    platform: linux/arm64  # Changez en linux/amd64 pour x86_64
     container_name: signflow_torchserve
     ports:
       - "8080:8080"  # Inference API
@@ -100,9 +103,12 @@ services:
     volumes:
       - ./backend/torchserve/model-store:/home/model-server/model-store
       - ./backend/torchserve/config:/home/model-server/config
+      - ./backend/torchserve/start.sh:/home/model-server/start.sh:ro
     environment:
-      - TS_NUMBER_OF_GPU=1
+      # Device detection automatique dans start.sh
+      - TS_NUMBER_OF_GPU=${TS_NUMBER_OF_GPU:-0}  # 0=auto-detect
       - TS_INSTALL_PY_DEP_PER_MODEL=true
+      - TORCH_DEVICE=${TORCH_DEVICE:-auto}  # auto, cpu, mps, cuda
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/ping"]
@@ -116,11 +122,7 @@ services:
           memory: 8G
           cpus: '4.0'
         reservations:
-          memory: 4G
-          devices:
-            - driver: nvidia
-              capabilities: [gpu]
-              count: 1
+          memory: 2G
 
 volumes:
   pgdata:

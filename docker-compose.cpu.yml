@@ -1,0 +1,16 @@
+# docker-compose override pour CPU uniquement (portable)
+# Usage: docker-compose -f docker-compose.yml -f docker-compose.cpu.yml up
+
+services:
+  torchserve:
+    platform: linux/amd64  # ou linux/arm64 selon votre CPU
+    environment:
+      - TORCH_DEVICE=cpu
+      - TS_NUMBER_OF_GPU=0
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+          cpus: '2.0'
+        reservations:
+          memory: 1G
