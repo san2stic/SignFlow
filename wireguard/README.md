@@ -138,6 +138,13 @@ sudo ufw allow 51820/udp  # Linux
 docker logs signflow_wireguard
 ```
 
+### Le port 51820/UDP reste fermé depuis Internet
+
+1. Définir `WG_SERVERURL` dans `.env` avec ton IPv4 publique ou un domaine.
+2. Configurer un port-forward UDP `51820 -> 192.168.0.49:51820` sur le routeur (adapter l'IP LAN du serveur).
+3. Vérifier que l'IP WAN du routeur correspond à `curl -4 ifconfig.me`.
+4. Si l'IP WAN est différente, tu es probablement derrière CGNAT: demander une IPv4 publique à l'opérateur, ou passer par un VPS/relais.
+
 Si l'import iOS/Android affiche "configuration WireGuard invalide", vérifie la ligne `Endpoint` dans `peerX.conf` :
 
 ```ini
@@ -171,7 +178,8 @@ docker-compose -f docker-compose.prod.yml restart wireguard
 
 | Variable | Valeur | Description |
 |----------|--------|-------------|
-| `SERVERURL` | `auto` | Détection auto IP publique |
+| `WG_SERVERURL` | *(vide)* | IP publique IPv4 ou domaine (recommandé). Injecté dans `SERVERURL` du conteneur. |
+| `SERVERURL` | `auto` | Détection auto IP publique (fallback si `WG_SERVERURL` non défini) |
 | `SERVERPORT` | `51820` | Port UDP WireGuard |
 | `PEERS` | `5` | Nombre de clients |
 | `INTERNAL_SUBNET` | `10.13.13.0` | Réseau VPN |
