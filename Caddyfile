@@ -22,7 +22,7 @@
   reverse_proxy frontend:8080
 }
 
-:443 {
+https://{$SIGNFLOW_DOMAIN}, https://localhost, https://127.0.0.1 {
   tls internal
 
   encode zstd gzip
