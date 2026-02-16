@@ -1,32 +1,20 @@
 import { Suspense, lazy } from "react";
 import { Navigate, createBrowserRouter, isRouteErrorResponse, useRouteError } from "react-router-dom";
 
-import { PageShell } from "./components/layout/PageShell";
+import MainLayout from "./components/layout/MainLayout";
+import ProtectedRoute from "./components/ProtectedRoute";
+import Login from "./pages/Login";
+import Register from "./pages/Register";
 
+const Dashboard = lazy(() => import("./pages/Dashboard"));
 const TranslatePage = lazy(async () => {
   const module = await import("./pages/TranslatePage");
   return { default: module.TranslatePage };
 });
-
-const TrainPage = lazy(async () => {
-  const module = await import("./pages/TrainPage");
-  return { default: module.TrainPage };
-});
-
-const DictionaryPage = lazy(async () => {
-  const module = await import("./pages/DictionaryPage");
-  return { default: module.DictionaryPage };
-});
-
-const DashboardPage = lazy(async () => {
-  const module = await import("./pages/DashboardPage");
-  return { default: module.DashboardPage };
-});
-
-const SettingsPage = lazy(async () => {
-  const module = await import("./pages/SettingsPage");
-  return { default: module.SettingsPage };
-});
+const Dictionary = lazy(() => import("./pages/Dictionary"));
+const Training = lazy(() => import("./pages/Training"));
+const Settings = lazy(() => import("./pages/Settings"));
+const Profile = lazy(() => import("./pages/Profile"));
 
 function RouteFallback(): JSX.Element {
   return (
@@ -61,27 +49,32 @@ function RouteErrorBoundary(): JSX.Element {
   );
 }
 
-export const routeItems = [
-  { path: "/translate", label: "Translate", icon: "📹" },
-  { path: "/train", label: "Train", icon: "🎯" },
-  { path: "/dictionary", label: "Dictionary", icon: "📖" },
-  { path: "/dashboard", label: "Dashboard", icon: "📊" },
-  { path: "/settings", label: "Settings", icon: "⚙️" }
-];
-
 export const router = createBrowserRouter([
   {
+    path: "/login",
+    element: <Login />,
+  },
+  {
+    path: "/register",
+    element: <Register />,
+  },
+  {
     path: "/",
-    element: <PageShell />,
+    element: (
+      <ProtectedRoute>
+        <MainLayout />
+      </ProtectedRoute>
+    ),
     errorElement: <RouteErrorBoundary />,
     children: [
-      { index: true, element: <Navigate to="/translate" replace /> },
+      { index: true, element: <Navigate to="/dashboard" replace /> },
+      { path: "dashboard", element: withSuspense(<Dashboard />) },
       { path: "translate", element: withSuspense(<TranslatePage />) },
-      { path: "train", element: withSuspense(<TrainPage />) },
-      { path: "dictionary", element: withSuspense(<DictionaryPage />) },
-      { path: "dashboard", element: withSuspense(<DashboardPage />) },
-      { path: "settings", element: withSuspense(<SettingsPage />) },
-      { path: "*", element: <Navigate to="/translate" replace /> }
-    ]
-  }
+      { path: "dictionary", element: withSuspense(<Dictionary />) },
+      { path: "training", element: withSuspense(<Training />) },
+      { path: "settings", element: withSuspense(<Settings />) },
+      { path: "profile", element: withSuspense(<Profile />) },
+      { path: "*", element: <Navigate to="/dashboard" replace /> },
+    ],
+  },
 ]);

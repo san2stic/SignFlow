@@ -77,6 +77,11 @@ class Settings(BaseSettings):
     mlflow_registry_auto_promote_staging: bool = True
     mlflow_tracking_uri: str | None = None
 
+    # JWT Authentication
+    jwt_secret_key: str = Field(default="your-secret-key-change-in-production-minimum-32-chars")
+    jwt_algorithm: str = "HS256"
+    jwt_access_token_expire_minutes: int = Field(default=10080, ge=1, le=525600)  # 7 days default
+
     @property
     def cors_origin_list(self) -> list[str]:
         """Parse comma-separated CORS origins."""

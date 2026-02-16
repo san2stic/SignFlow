@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
+
+if TYPE_CHECKING:
+    from app.models.user import User
 
 
 class Video(Base):
@@ -21,6 +24,12 @@ class Video(Base):
     sign_id: Mapped[Optional[str]] = mapped_column(
         String(36),
         ForeignKey("signs.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True
+    )
+    user_id: Mapped[Optional[int]] = mapped_column(
+        Integer,
+        ForeignKey("users.id", ondelete="SET NULL"),
         nullable=True,
         index=True
     )
@@ -42,3 +51,4 @@ class Video(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
     sign = relationship("Sign", back_populates="videos")
+    user = relationship("User", back_populates="videos")
