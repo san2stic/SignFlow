@@ -1,32 +1,4 @@
 services:
-  wireguard:
-    image: linuxserver/wireguard:latest
-    container_name: signflow_wireguard
-    cap_add:
-      - NET_ADMIN
-      - SYS_MODULE
-    environment:
-      - PUID=1000
-      - PGID=1000
-      - TZ=Europe/Paris
-      - SERVERURL=${WG_SERVERURL:-auto}  # Public IPv4/DNS recommandé pour éviter les endpoints IPv6 non joignables
-      - SERVERPORT=51820
-      - PEERS=5  # Nombre de clients (laptop, phone, tablet, etc.)
-      - PEERDNS=auto
-      - INTERNAL_SUBNET=10.13.13.0
-      - ALLOWEDIPS=10.13.13.0/24  # Réseau VPN uniquement
-      - LOG_CONFS=true
-    volumes:
-      - ./wireguard/config:/config
-      - /lib/modules:/lib/modules
-    ports:
-      - "51820:51820/udp"
-    sysctls:
-      - net.ipv4.conf.all.src_valid_mark=1
-    restart: unless-stopped
-    networks:
-      - signflow_network
-
   caddy:
     image: caddy:2-alpine
     restart: unless-stopped
