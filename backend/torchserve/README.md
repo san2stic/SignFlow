@@ -8,6 +8,8 @@
 
 ## Commandes Utiles
 
+**Note:** Run these commands from the `backend/torchserve/` directory.
+
 ### Créer model archive
 ```bash
 torch-model-archiver \
@@ -15,7 +17,7 @@ torch-model-archiver \
   --version 1.0 \
   --serialized-file ../data/models/model_v1.pt \
   --handler handler.py \
-  --extra-files "../app/ml/features.py,../app/ml/feature_engineering.py,../app/ml/dataset.py" \
+  --extra-files "../../app/ml/features.py,../../app/ml/feature_engineering.py,../../app/ml/dataset.py" \
   --export-path model-store/
 ```
 

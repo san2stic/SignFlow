@@ -90,9 +90,20 @@ services:
     environment:
       - TS_NUMBER_OF_GPU=1
       - TS_INSTALL_PY_DEP_PER_MODEL=true
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
     deploy:
       resources:
+        limits:
+          memory: 8G
+          cpus: '4.0'
         reservations:
+          memory: 4G
           devices:
             - driver: nvidia
               capabilities: [gpu]
