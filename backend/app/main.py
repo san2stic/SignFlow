@@ -43,7 +43,7 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=settings.cors_origin_list,
+    allow_origin_regex=r".*",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -111,8 +111,6 @@ def ensure_runtime_schema() -> None:
 def on_startup() -> None:
     """Initialize database schema and ML pipeline for local development."""
     if settings.env.lower() == "production":
-        if "*" in settings.cors_origin_list:
-            raise RuntimeError("CORS_ORIGINS cannot contain '*' in production")
         if settings.docs_enabled:
             logger.warning("docs_enabled_in_production")
 
