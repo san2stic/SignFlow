@@ -95,8 +95,11 @@ Tous ces fichiers seront créés dans `./wireguard/config/` au premier démarrag
 
 2. Scanner le QR code :
    ```bash
-   # Afficher le QR code dans le terminal
-   cat wireguard/config/peer1/peer1.png
+   # Ouvrir l'image QR générée (macOS)
+   open wireguard/config/peer1/peer1.png
+
+   # OU afficher un QR texte dans le terminal
+   docker exec signflow_wireguard sh -lc 'qrencode -t ansiutf8 < /config/peer1/peer1.conf'
    ```
 
 ## Vérification de connexion
@@ -134,6 +137,14 @@ sudo ufw allow 51820/udp  # Linux
 # Vérifier les logs WireGuard
 docker logs signflow_wireguard
 ```
+
+Si l'import iOS/Android affiche "configuration WireGuard invalide", vérifie la ligne `Endpoint` dans `peerX.conf` :
+
+```ini
+Endpoint = [IPv6_DU_SERVEUR]:51820
+```
+
+Pour un endpoint IPv4 ou domaine, ne pas mettre de crochets.
 
 ### Les services Docker ne sont pas accessibles
 
