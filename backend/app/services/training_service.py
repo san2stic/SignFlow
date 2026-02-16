@@ -32,6 +32,7 @@ from app.ml.feature_engineering import ENRICHED_FEATURE_DIM
 from app.ml.fewshot import prepare_few_shot_model
 from app.ml.model import SignTransformer
 from app.ml.prototypical import run_prototypical_fallback
+from app.ml.registry import create_default_registry
 from app.ml.trainer import (
     SignTrainer,
     TrainingConfig as MLTrainingConfig,
@@ -65,6 +66,46 @@ class TrainingService:
             return float((config or {}).get("min_deploy_accuracy", 0.85))
         except (TypeError, ValueError):
             return 0.85
+
+    @staticmethod
+    def _register_model_registry_version(
+        *,
+        model_path: Path,
+        signflow_version: str,
+        training_session_id: str,
+        local_model_version_id: str,
+        parent_version: str | None,
+    ) -> dict[str, object]:
+        """Best-effort MLflow registry registration for produced artifacts."""
+        settings = get_settings()
+        registry = create_default_registry(
+            enabled=bool(settings.mlflow_registry_enabled),
+            model_name=settings.mlflow_registry_model_name,
+            tracking_uri=settings.mlflow_tracking_uri,
+        )
+        tags = {
+            "training_session_id": training_session_id,
+            "local_model_version_id": local_model_version_id,
+        }
+        if parent_version:
+            tags["parent_version"] = parent_version
+        result = registry.register_model(
+            model_path=str(model_path),
+            version_name=signflow_version,
+            run_id=training_session_id,
+            tags=tags,
+        )
+        if (
+            isinstance(result, dict)
+            and result.get("registered")
+            and bool(settings.mlflow_registry_auto_promote_staging)
+            and result.get("registry_version")
+        ):
+            staging = registry.promote_to_staging(
+                registry_version=str(result["registry_version"])
+            )
+            result["staging_promotion"] = staging
+        return result
 
     @staticmethod
     def _resolve_device() -> str:
@@ -2633,6 +2674,17 @@ class TrainingService:
                 )
                 db.add(model_version)
                 db.flush()
+
+                registry_result = self._register_model_registry_version(
+                    model_path=model_file,
+                    signflow_version=version,
+                    training_session_id=session.id,
+                    local_model_version_id=model_version.id,
+                    parent_version=parent_version,
+                )
+                if isinstance(artifact_metadata, dict):
+                    artifact_metadata["registry"] = registry_result
+                    model_version.artifact_metadata = artifact_metadata
 
                 session.status = "completed"
                 session.progress = 100.0

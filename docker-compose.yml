@@ -16,6 +16,19 @@ services:
       - CORS_ORIGINS=http://localhost:3000
       - TRUSTED_HOSTS=localhost,127.0.0.1,testserver,backend,frontend
       - TRAINING_USE_CELERY=true
+      - USE_TORCHSERVE=false
+      - TORCHSERVE_URL=http://torchserve:8080
+      - TORCHSERVE_TIMEOUT_MS=2000
+      - CANARY_PERCENTAGE=0
+      - CANARY_MODEL_ID=
+      - SHADOW_MODE_ENABLED=false
+      - SHADOW_MODEL_ID=
+      - SHADOW_MIN_CONFIDENCE=0.6
+      - INFERENCE_METRICS_ENABLED=true
+      - DRIFT_DETECTION_ENABLED=true
+      - MLFLOW_REGISTRY_ENABLED=false
+      - MLFLOW_REGISTRY_MODEL_NAME=signflow-model
+      - MLFLOW_REGISTRY_AUTO_PROMOTE_STAGING=true
     depends_on:
       - db
       - redis

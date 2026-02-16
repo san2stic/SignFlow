@@ -45,6 +45,25 @@ class Settings(BaseSettings):
     translate_inference_num_views: int = Field(default=1, ge=1, le=8)
     translate_inference_temperature: float = Field(default=1.0, ge=0.1, le=3.0)
     translate_max_view_disagreement: float = Field(default=0.35, ge=0.01, le=1.0)
+    use_torchserve: bool = False
+    torchserve_url: str = Field(default="http://torchserve:8080")
+    torchserve_timeout_ms: int = Field(default=2000, ge=100, le=30000)
+    canary_percentage: float = Field(default=0.0, ge=0.0, le=100.0)
+    canary_model_id: str | None = None
+    shadow_mode_enabled: bool = False
+    shadow_model_id: str | None = None
+    shadow_min_confidence: float = Field(default=0.6, ge=0.0, le=1.0)
+    inference_metrics_enabled: bool = True
+    drift_detection_enabled: bool = True
+    drift_window_size: int = Field(default=1000, ge=64, le=50000)
+    drift_check_every: int = Field(default=100, ge=1, le=10000)
+    drift_min_samples: int = Field(default=200, ge=32, le=50000)
+    drift_p_value_threshold: float = Field(default=0.05, ge=0.000001, le=1.0)
+    drift_mean_shift_threshold: float = Field(default=0.12, ge=0.0, le=1.0)
+    mlflow_registry_enabled: bool = False
+    mlflow_registry_model_name: str = "signflow-model"
+    mlflow_registry_auto_promote_staging: bool = True
+    mlflow_tracking_uri: str | None = None
 
     @property
     def cors_origin_list(self) -> list[str]:

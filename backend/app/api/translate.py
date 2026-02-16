@@ -7,6 +7,7 @@ import re
 import time
 from pathlib import Path
 
+import numpy as np
 import structlog
 import torch
 from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
@@ -15,9 +16,14 @@ from sqlalchemy.orm import Session
 from starlette.websockets import WebSocketState
 
 from app.api.deps import acquire_ws_slot, enforce_ws_message_rate, release_ws_slot
+from app.api.router_v2 import ModelRouter
+from app.api.shadow_mode import ShadowModeEvaluator
 from app.config import get_settings
 from app.database import SessionLocal
+from app.ml.metrics import get_metrics_collector
+from app.ml.monitoring import DriftDetector
 from app.ml.pipeline import SignFlowInferencePipeline
+from app.ml.torchserve_client import TorchServeClient
 from app.models.model_version import ModelVersion
 from app.models.sign import Sign
 
@@ -26,6 +32,11 @@ logger = structlog.get_logger(__name__)
 
 # Global pipeline template (loaded once at startup; per-connection state is isolated)
 _global_pipeline: SignFlowInferencePipeline | None = None
+_global_torchserve_client: TorchServeClient | None = None
+_global_drift_detector: DriftDetector | None = None
+_global_model_router: ModelRouter | None = None
+_global_model_router_config: tuple[float, str | None, bool, str | None] | None = None
+_global_shadow_evaluator: ShadowModeEvaluator | None = None
 _TOKEN_RE = re.compile(r"[a-zA-Z0-9_-]+")
 
 
@@ -140,6 +151,7 @@ def get_or_create_pipeline() -> SignFlowInferencePipeline:
             )
             pipeline = SignFlowInferencePipeline(
                 model_path=active_model.file_path,
+                model_version=active_model.version,
                 seq_len=max(8, min(256, sequence_length)),
                 confidence_threshold=settings.translate_confidence_threshold,
                 inference_num_views=settings.translate_inference_num_views,
@@ -163,6 +175,7 @@ def get_or_create_pipeline() -> SignFlowInferencePipeline:
             # Create pipeline without model (will return NONE predictions)
             pipeline = SignFlowInferencePipeline(
                 model_path=None,
+                model_version="none",
                 seq_len=settings.translate_seq_len,
                 confidence_threshold=settings.translate_confidence_threshold,
                 inference_num_views=settings.translate_inference_num_views,
@@ -179,6 +192,7 @@ def get_or_create_pipeline() -> SignFlowInferencePipeline:
         # Fallback: create pipeline without model
         pipeline = SignFlowInferencePipeline(
             model_path=None,
+            model_version="none",
             seq_len=settings.translate_seq_len,
             confidence_threshold=settings.translate_confidence_threshold,
             inference_num_views=settings.translate_inference_num_views,
@@ -196,10 +210,147 @@ def get_or_create_pipeline() -> SignFlowInferencePipeline:
         db.close()
 
 
+def load_pipeline_for_model(model_id: str) -> SignFlowInferencePipeline | None:
+    """Load a pipeline template for a specific model version id."""
+    settings = get_settings()
+    db = SessionLocal()
+    try:
+        model = db.get(ModelVersion, model_id)
+        if model is None or not model.file_path or not Path(model.file_path).exists():
+            return None
+
+        labels = _resolve_pipeline_labels(db, model)
+        try:
+            model_metadata = model.artifact_metadata or {}
+        except Exception:  # noqa: BLE001
+            model_metadata = {}
+        calibration = model_metadata.get("calibration", {}) if isinstance(model_metadata, dict) else {}
+        class_thresholds = (
+            model_metadata.get("class_thresholds", {})
+            if isinstance(model_metadata, dict)
+            else {}
+        )
+        checkpoint_runtime = _load_checkpoint_runtime_metadata(model.file_path)
+        sequence_length = int(
+            checkpoint_runtime.get("sequence_length")
+            or settings.translate_seq_len
+        )
+        calibration_temperature = calibration.get("temperature")
+        if calibration_temperature is None:
+            calibration_temperature = checkpoint_runtime.get("calibration_temperature")
+
+        pipeline = SignFlowInferencePipeline(
+            model_path=model.file_path,
+            model_version=model.version,
+            seq_len=max(8, min(256, sequence_length)),
+            confidence_threshold=settings.translate_confidence_threshold,
+            inference_num_views=settings.translate_inference_num_views,
+            inference_temperature=settings.translate_inference_temperature,
+            max_view_disagreement=settings.translate_max_view_disagreement,
+            calibration_temperature=(
+                float(calibration_temperature)
+                if calibration_temperature is not None
+                else None
+            ),
+            class_thresholds=(
+                class_thresholds if isinstance(class_thresholds, dict) else {}
+            ),
+            device="cpu",
+        )
+        pipeline.set_labels(labels)
+        return pipeline
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "failed_to_load_specific_model_pipeline",
+            model_id=model_id,
+            error=str(exc),
+        )
+        return None
+    finally:
+        db.close()
+
+
+def get_or_create_model_router() -> ModelRouter:
+    """Get or create canary/shadow-aware model router."""
+    global _global_model_router, _global_model_router_config
+
+    settings = get_settings()
+    config_signature = (
+        float(settings.canary_percentage),
+        settings.canary_model_id,
+        bool(settings.shadow_mode_enabled),
+        settings.shadow_model_id,
+    )
+
+    if _global_model_router is not None and _global_model_router_config == config_signature:
+        return _global_model_router
+
+    _global_model_router = ModelRouter(
+        production_provider=lambda: get_or_create_pipeline(),
+        model_loader=lambda model_id: load_pipeline_for_model(model_id),
+        canary_percentage=settings.canary_percentage,
+        canary_model_id=settings.canary_model_id,
+        shadow_mode_enabled=settings.shadow_mode_enabled,
+        shadow_model_id=settings.shadow_model_id,
+    )
+    _global_model_router_config = config_signature
+    return _global_model_router
+
+
+def get_or_create_shadow_evaluator() -> ShadowModeEvaluator:
+    """Get or create shared shadow-mode evaluator."""
+    global _global_shadow_evaluator
+
+    if _global_shadow_evaluator is not None:
+        return _global_shadow_evaluator
+
+    settings = get_settings()
+    _global_shadow_evaluator = ShadowModeEvaluator(
+        min_confidence=settings.shadow_min_confidence,
+    )
+    return _global_shadow_evaluator
+
+
+def get_or_create_torchserve_client() -> TorchServeClient:
+    """Get or create a shared TorchServe HTTP client."""
+    global _global_torchserve_client
+
+    if _global_torchserve_client is not None:
+        return _global_torchserve_client
+
+    settings = get_settings()
+    timeout_seconds = max(0.1, float(settings.torchserve_timeout_ms) / 1000.0)
+    _global_torchserve_client = TorchServeClient(
+        base_url=settings.torchserve_url,
+        timeout_seconds=timeout_seconds,
+    )
+    return _global_torchserve_client
+
+
+def get_or_create_drift_detector() -> DriftDetector:
+    """Get or create shared confidence drift detector."""
+    global _global_drift_detector
+
+    if _global_drift_detector is not None:
+        return _global_drift_detector
+
+    settings = get_settings()
+    _global_drift_detector = DriftDetector(
+        window_size=settings.drift_window_size,
+        check_every=settings.drift_check_every,
+        min_samples=settings.drift_min_samples,
+        p_value_threshold=settings.drift_p_value_threshold,
+        mean_shift_threshold=settings.drift_mean_shift_threshold,
+    )
+    return _global_drift_detector
+
+
 def reload_pipeline() -> None:
     """Force reload of the global pipeline (called after training completes)."""
-    global _global_pipeline
+    global _global_pipeline, _global_model_router, _global_model_router_config
     _global_pipeline = None
+    _global_model_router = None
+    _global_model_router_config = None
     logger.info("pipeline_reload_scheduled")
 
 
@@ -213,6 +364,13 @@ async def translate_stream(websocket: WebSocket) -> None:
     - Server responds: {"prediction": str, "confidence": float, "alternatives": [...], ...}
     """
     settings = get_settings()
+    use_torchserve = bool(settings.use_torchserve)
+    metrics_collector = get_metrics_collector()
+    drift_detector = get_or_create_drift_detector() if settings.drift_detection_enabled else None
+    shadow_evaluator = get_or_create_shadow_evaluator() if settings.shadow_mode_enabled else None
+    torchserve_client: TorchServeClient | None = None
+    shadow_pipeline: SignFlowInferencePipeline | None = None
+    route = "production"
     slot_key = None
     client_host = websocket.client.host if websocket.client else "unknown"
     try:
@@ -225,15 +383,35 @@ async def translate_stream(websocket: WebSocket) -> None:
 
     # Build an isolated per-connection pipeline from the shared template.
     try:
-        pipeline_template = get_or_create_pipeline()
-        pipeline = pipeline_template.spawn_session()
+        model_router = get_or_create_model_router()
+        routing_session = model_router.spawn_sessions()
+        pipeline = routing_session.primary
+        shadow_pipeline = routing_session.shadow
+        route = routing_session.route
     except Exception as e:
         logger.error("failed_to_get_pipeline", error=str(e))
         await websocket.close(code=1011, reason="Failed to initialize inference pipeline")
         return
 
-    # Ensure clean session state (defensive, spawn_session already isolates state).
-    pipeline.reset()
+    if settings.inference_metrics_enabled:
+        metrics_collector.record_routing_decision(route=route)
+
+    if route == "canary" and use_torchserve:
+        # TorchServe path currently serves one active model; keep canary honest by local inference.
+        logger.info("torchserve_disabled_for_canary_route")
+        use_torchserve = False
+
+    if use_torchserve:
+        try:
+            torchserve_client = get_or_create_torchserve_client()
+            logger.info("torchserve_enabled_for_translate_stream", url=settings.torchserve_url)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "torchserve_client_init_failed_fallback_local",
+                error=str(exc),
+            )
+            metrics_collector.record_torchserve_error(reason="client_init_failed")
+            use_torchserve = False
 
     frame_count = 0
     start_time = time.time()
@@ -276,11 +454,76 @@ async def translate_stream(websocket: WebSocket) -> None:
             # Process frame
             frame_start = time.time()
             try:
-                prediction = pipeline.process_frame(payload)
+                if use_torchserve and torchserve_client is not None and hasattr(pipeline, "process_frame_async"):
+                    async def _infer_window_async(
+                        window: np.ndarray,
+                    ) -> tuple[str, float, list[dict[str, float]]]:
+                        try:
+                            return await torchserve_client.predict(window)
+                        except Exception as exc:  # noqa: BLE001
+                            logger.warning(
+                                "torchserve_inference_failed_fallback_local",
+                                error=str(exc),
+                            )
+                            metrics_collector.record_torchserve_error(reason="inference_error")
+                            return pipeline._infer_window(window)
+
+                    prediction = await pipeline.process_frame_async(
+                        payload,
+                        infer_window_async=_infer_window_async,
+                    )
+                else:
+                    prediction = pipeline.process_frame(payload)
 
                 # Calculate latency
                 latency_ms = (time.time() - frame_start) * 1000
                 frame_count += 1
+
+                if settings.inference_metrics_enabled and prediction.decision_diagnostics is not None:
+                    metrics_collector.record_inference(
+                        model_version=getattr(pipeline, "model_version", "unknown"),
+                        sign=prediction.prediction,
+                        confidence=prediction.confidence,
+                        latency_seconds=latency_ms / 1000.0,
+                    )
+
+                    if drift_detector is not None and prediction.prediction != "RECORDING":
+                        drift_result = drift_detector.record(prediction.confidence)
+                        if drift_result.checked and drift_result.drift_detected:
+                            metrics_collector.record_drift_alert(kind="confidence")
+                            logger.warning(
+                                "confidence_drift_detected",
+                                samples=drift_result.samples,
+                                reason=drift_result.reason,
+                                p_value=drift_result.p_value,
+                                statistic=drift_result.statistic,
+                                reference_mean=drift_result.reference_mean,
+                                current_mean=drift_result.current_mean,
+                            )
+
+                if shadow_pipeline is not None:
+                    try:
+                        shadow_prediction = shadow_pipeline.process_frame(payload)
+                        if shadow_evaluator is not None:
+                            comparison = shadow_evaluator.compare(
+                                primary=prediction,
+                                shadow=shadow_prediction,
+                            )
+                            if settings.inference_metrics_enabled:
+                                metrics_collector.record_shadow_comparison(
+                                    route=route,
+                                    disagreed=comparison.disagreed,
+                                )
+                            if comparison.high_confidence_disagreement:
+                                logger.warning(
+                                    "shadow_high_confidence_disagreement",
+                                    route=route,
+                                    primary=comparison.primary_prediction,
+                                    shadow=comparison.shadow_prediction,
+                                    confidence_gap=round(comparison.confidence_gap, 4),
+                                )
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning("shadow_mode_inference_failed", error=str(exc))
 
                 # Log performance metrics periodically
                 if frame_count % 30 == 0:  # Every ~1 second at 30fps

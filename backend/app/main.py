@@ -11,12 +11,13 @@ except Exception:  # pragma: no cover
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from sqlalchemy import inspect, text
 
 from app.api.router import api_router
 from app.config import get_settings
 from app.database import Base, engine
+from app.ml.metrics import get_metrics_collector
 
 settings = get_settings()
 
@@ -128,6 +129,13 @@ def on_startup() -> None:
 def healthcheck() -> dict[str, str]:
     """Simple health endpoint for probes."""
     return {"status": "ok"}
+
+
+@app.get("/metrics", tags=["monitoring"])
+def metrics() -> Response:
+    """Prometheus metrics endpoint."""
+    payload, content_type = get_metrics_collector().render_latest()
+    return Response(content=payload, media_type=content_type)
 
 
 app.include_router(api_router, prefix=settings.api_v1_prefix)

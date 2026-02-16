@@ -10,6 +10,8 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.config import Settings
+from app.config import get_settings
+from app.ml.registry import create_default_registry
 from app.models.model_version import ModelVersion
 from app.schemas.model_version import (
     ModelVersion as ModelVersionSchema,
@@ -58,8 +60,27 @@ class ModelService:
         for candidate in db.scalars(select(ModelVersion)).all():
             candidate.is_active = candidate.id == model_id
         db.commit()
+        self._try_promote_registry_production(target)
 
         return ModelVersionActivateResponse(active_model_id=target.id, version=target.version)
+
+    @staticmethod
+    def _try_promote_registry_production(model: ModelVersion) -> None:
+        """Best-effort promotion to MLflow Production stage."""
+        metadata = model.artifact_metadata or {}
+        registry = metadata.get("registry", {}) if isinstance(metadata, dict) else {}
+        registry_version = registry.get("registry_version") if isinstance(registry, dict) else None
+        if not registry_version:
+            return
+
+        settings = get_settings()
+        model_name = registry.get("model_name") if isinstance(registry, dict) else None
+        registry_client = create_default_registry(
+            enabled=bool(settings.mlflow_registry_enabled),
+            model_name=str(model_name or settings.mlflow_registry_model_name),
+            tracking_uri=settings.mlflow_tracking_uri,
+        )
+        registry_client.promote_to_production(registry_version=str(registry_version))
 
     def export(self, db: Session, model_id: str, fmt: str, settings: Settings) -> ModelVersionExportResponse:
         """Return path to exported model artifact in requested format."""

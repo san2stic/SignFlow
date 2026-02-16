@@ -5,20 +5,27 @@
 - `config/config.properties` - Configuration TorchServe
 - `model-store/` - Model archives (.mar)
 - `handler.py` - Handler custom pour preprocessing/inference/postprocessing
+- `labels.json` - Labels par défaut pour sortie top-k
 
 ## Commandes Utiles
 
-**Note:** Run these commands from the `backend/torchserve/` directory.
-
-### Créer model archive
+### Créer model archive (recommandé)
 ```bash
+cd backend
+./scripts/package_torchserve_model.sh ./data/models/model_v1.pt
+```
+
+### Créer model archive (manuel)
+```bash
+cd backend
 torch-model-archiver \
   --model-name signflow \
   --version 1.0 \
-  --serialized-file ../data/models/model_v1.pt \
-  --handler handler.py \
-  --extra-files "../../app/ml/features.py,../../app/ml/feature_engineering.py,../../app/ml/dataset.py" \
-  --export-path model-store/
+  --serialized-file ./data/models/model_v1.pt \
+  --handler ./torchserve/handler.py \
+  --extra-files ./torchserve/labels.json \
+  --export-path ./torchserve/model-store \
+  --force
 ```
 
 ### Enregistrer modèle via Management API

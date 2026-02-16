@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections import deque
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -53,6 +54,7 @@ class SignFlowInferencePipeline:
         self,
         *,
         model_path: str | Path | None = None,
+        model_version: str | None = None,
         seq_len: int = 64,
         confidence_threshold: float = 0.7,
         smoothing_window: int = 5,
@@ -95,6 +97,7 @@ class SignFlowInferencePipeline:
             max_view_disagreement: Max tolerated view disagreement before confidence penalty.
         """
         self.seq_len = seq_len
+        self.model_version = str(model_version or "unknown")
         self.confidence_threshold = confidence_threshold
         self.min_hand_visibility = min_hand_visibility
         self.min_prediction_margin = min_prediction_margin
@@ -284,6 +287,7 @@ class SignFlowInferencePipeline:
         """Create an isolated per-session pipeline sharing only immutable runtime artifacts."""
         session_pipeline = SignFlowInferencePipeline(
             model_path=None,
+            model_version=self.model_version,
             seq_len=self.seq_len,
             confidence_threshold=self.confidence_threshold,
             smoothing_window=int(self.prediction_history.maxlen or 5),
@@ -304,6 +308,8 @@ class SignFlowInferencePipeline:
             class_thresholds=dict(self.class_thresholds),
         )
         session_pipeline.model = self.model
+        session_pipeline.onnx_session = self.onnx_session
+        session_pipeline.use_onnx = self.use_onnx
         session_pipeline.set_labels(list(self.labels))
         return session_pipeline
 
@@ -379,6 +385,94 @@ class SignFlowInferencePipeline:
         self.state = InferenceState.IDLE
         return self._idle_prediction()
 
+    async def process_frame_async(
+        self,
+        payload: dict,
+        *,
+        infer_window_async: Callable[
+            [np.ndarray], Awaitable[tuple[str, float, list[dict[str, float]]]]
+        ] | None = None,
+    ) -> Prediction:
+        """
+        Async variant of process_frame.
+
+        Args:
+            payload: Frame landmarks payload
+            infer_window_async: Optional async backend used at sign-end inference.
+                If omitted, falls back to local model inference.
+        """
+        frame = FrameLandmarks(
+            left_hand=payload.get("hands", {}).get("left", []) or [],
+            right_hand=payload.get("hands", {}).get("right", []) or [],
+            pose=payload.get("pose", []) or [],
+            face=payload.get("face", []) or [],
+        )
+
+        metadata = payload.get("metadata", {})
+        frontend_confidence = self._resolve_frontend_confidence(metadata)
+        self._latest_frontend_confidence = frontend_confidence
+
+        if frontend_confidence < 0.3:
+            logger.debug(
+                "low_frontend_confidence",
+                confidence=round(frontend_confidence, 3),
+                left_visible=metadata.get("leftHandVisible", False),
+                right_visible=metadata.get("rightHandVisible", False),
+            )
+
+        raw_hand_visibility = self._compute_hand_visibility(frame)
+        hand_visibility = self._blend_hand_visibility(raw_hand_visibility, frontend_confidence)
+        self.hand_visibility_history.append(hand_visibility)
+
+        features = normalize_landmarks(frame, include_face=False)
+        self.frame_buffer.append(features)
+        self._current_motion_energy = self._compute_motion_energy()
+        self.motion_history.append(self._current_motion_energy)
+
+        if self.state == InferenceState.IDLE:
+            if (
+                self._current_motion_energy > self.motion_start_threshold
+                and hand_visibility > self.min_hand_visibility
+            ):
+                if self.pre_roll_frames > 0:
+                    context_frames = list(self.frame_buffer)[-self.pre_roll_frames:]
+                    self.frame_buffer.clear()
+                    self.frame_buffer.extend(context_frames)
+                else:
+                    self.frame_buffer.clear()
+                    self.frame_buffer.append(features)
+                self.state = InferenceState.RECORDING
+                self._recording_frame_count = 1
+                self._rest_frame_count = 0
+            return self._idle_prediction()
+
+        if self.state == InferenceState.RECORDING:
+            self._recording_frame_count += 1
+
+            is_resting = self._current_motion_energy < self.motion_start_threshold
+            if is_resting:
+                self._rest_frame_count += 1
+            else:
+                self._rest_frame_count = 0
+
+            sign_ended = (
+                (
+                    self._rest_frame_count >= self.rest_frames_threshold
+                    and self._recording_frame_count >= self.min_recording_frames
+                )
+                or len(self.frame_buffer) >= self.max_buffer_frames
+            )
+
+            if sign_ended:
+                return await self._infer_complete_sign_async(
+                    infer_window_async=infer_window_async
+                )
+
+            return self._recording_prediction()
+
+        self.state = InferenceState.IDLE
+        return self._idle_prediction()
+
     def _idle_prediction(self) -> Prediction:
         """Return a neutral prediction for the IDLE state."""
         return Prediction(
@@ -401,25 +495,89 @@ class SignFlowInferencePipeline:
 
     def _infer_complete_sign(self) -> Prediction:
         """Run inference on the complete recorded sign."""
+        enriched = self._prepare_enriched_window()
+        if enriched is None:
+            self.state = InferenceState.IDLE
+            return self._idle_prediction()
+
+        predicted_label, predicted_confidence, alternatives = self._infer_window(enriched)
+        return self._build_prediction_response(
+            predicted_label=predicted_label,
+            predicted_confidence=predicted_confidence,
+            alternatives=alternatives,
+        )
+
+    async def _infer_complete_sign_async(
+        self,
+        *,
+        infer_window_async: Callable[
+            [np.ndarray], Awaitable[tuple[str, float, list[dict[str, float]]]]
+        ] | None = None,
+    ) -> Prediction:
+        """Run inference on the complete recorded sign using an optional async backend."""
+        enriched = self._prepare_enriched_window()
+        if enriched is None:
+            self.state = InferenceState.IDLE
+            return self._idle_prediction()
+
+        if infer_window_async is None:
+            predicted_label, predicted_confidence, alternatives = self._infer_window(enriched)
+        else:
+            predicted_label, predicted_confidence, alternatives = await infer_window_async(enriched)
+
+        return self._build_prediction_response(
+            predicted_label=predicted_label,
+            predicted_confidence=predicted_confidence,
+            alternatives=alternatives,
+        )
+
+    def _prepare_enriched_window(self) -> np.ndarray | None:
+        """Build an enriched feature window from the buffered raw landmarks."""
         from app.ml.dataset import temporal_resample
         from app.ml.feature_engineering import compute_enriched_features
 
         if not self.frame_buffer:
-            self.state = InferenceState.IDLE
-            return self._idle_prediction()
+            return None
 
         buffer_array = np.stack(list(self.frame_buffer), axis=0)
         trimmed = self._trim_recording_window(buffer_array, trailing_rest=self._rest_frame_count)
         resampled = temporal_resample(trimmed, target_len=self.seq_len)
-        enriched = compute_enriched_features(resampled)
+        return compute_enriched_features(resampled)
 
-        predicted_label, predicted_confidence, alternatives = self._infer_window(enriched)
+    def _normalize_alternatives(self, alternatives: list[dict[str, float]] | None) -> list[dict[str, float]]:
+        """Normalize alternatives payload shape and numeric confidence."""
+        normalized: list[dict[str, float]] = []
+        for alternative in alternatives or []:
+            if not isinstance(alternative, dict):
+                continue
+            sign = alternative.get("sign") or alternative.get("prediction")
+            if not sign:
+                continue
+            try:
+                confidence = float(alternative.get("confidence", 0.0))
+            except (TypeError, ValueError):
+                confidence = 0.0
+            normalized.append({"sign": str(sign), "confidence": round(confidence, 3)})
+        return normalized
+
+    def _build_prediction_response(
+        self,
+        *,
+        predicted_label: str,
+        predicted_confidence: float,
+        alternatives: list[dict[str, float]] | None,
+    ) -> Prediction:
+        """Apply post-filters, reset recording state, and produce final response payload."""
+        normalized_label = str(predicted_label or "NONE")
+        normalized_confidence = float(predicted_confidence or 0.0)
+        normalized_alternatives = self._normalize_alternatives(alternatives)
+
         adaptive_threshold = self._adaptive_threshold()
-        label_threshold = self._threshold_for_label(predicted_label)
+        label_threshold = self._threshold_for_label(normalized_label)
         effective_threshold = max(adaptive_threshold, label_threshold)
-        predicted_label, predicted_confidence, filter_trace = self._apply_prediction_filters(
-            prediction=predicted_label,
-            confidence=predicted_confidence,
+        filtered_label, filtered_confidence, filter_trace = self._apply_prediction_filters(
+            prediction=normalized_label,
+            confidence=normalized_confidence,
             threshold=effective_threshold,
         )
 
@@ -432,21 +590,20 @@ class SignFlowInferencePipeline:
             "counters": dict(self._decision_counters),
         }
 
-        # Reset for next sign
         self.frame_buffer.clear()
         self._rest_frame_count = 0
         self._recording_frame_count = 0
         self.state = InferenceState.IDLE
 
-        if predicted_label != "NONE" and predicted_confidence >= max(adaptive_threshold, label_threshold):
-            if not self.sentence_tokens or self.sentence_tokens[-1] != predicted_label:
-                self.sentence_tokens.append(predicted_label)
+        if filtered_label != "NONE" and filtered_confidence >= effective_threshold:
+            if not self.sentence_tokens or self.sentence_tokens[-1] != filtered_label:
+                self.sentence_tokens.append(filtered_label)
 
         sentence = " ".join(self.sentence_tokens)
         return Prediction(
-            prediction=predicted_label,
-            confidence=predicted_confidence,
-            alternatives=alternatives,
+            prediction=filtered_label,
+            confidence=filtered_confidence,
+            alternatives=normalized_alternatives,
             sentence_buffer=sentence,
             is_sentence_complete=False,
             decision_diagnostics=decision_trace,

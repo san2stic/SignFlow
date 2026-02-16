@@ -9,6 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 import app.api.models as models_api
+import app.services.model_service as model_service_module
 from app.database import SessionLocal
 from app.main import app
 from app.models.model_version import ModelVersion
@@ -90,3 +91,36 @@ def test_active_endpoint_ignores_new_inactive_models() -> None:
     payload = response.json()
     assert payload["id"] == active_model_id
     assert payload["version"] != inactive_version
+
+
+def test_activate_model_attempts_registry_promotion(monkeypatch) -> None:
+    """Activation should attempt registry production promotion when metadata is present."""
+    calls = {"promote": 0}
+
+    class _FakeRegistry:
+        def promote_to_production(self, *, registry_version: str):
+            calls["promote"] += 1
+            return {"promoted": True, "registry_version": registry_version}
+
+    monkeypatch.setattr(
+        model_service_module,
+        "create_default_registry",
+        lambda **_kwargs: _FakeRegistry(),
+    )
+
+    with SessionLocal() as db:
+        for model in db.scalars(select(ModelVersion)).all():
+            model.is_active = False
+        training = _create_training_session(db)
+        target = _create_model(db, training.id, is_active=False)
+        target.artifact_metadata = {
+            "registry": {"registry_version": "9", "model_name": "signflow-registry"}
+        }
+        db.commit()
+        model_id = target.id
+
+    with TestClient(app) as client:
+        response = client.post(f"/api/v1/models/{model_id}/activate")
+
+    assert response.status_code == 200
+    assert calls["promote"] == 1
