@@ -20,6 +20,7 @@ frontend/dist/
 backend/data/models/*.pt
 backend/data/videos/**
 !backend/data/videos/.gitkeep
+!backend/data/videos/*.dvc
 backend/data/exports/**
 
 # Env

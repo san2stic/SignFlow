@@ -10,7 +10,7 @@ from pathlib import Path
 import numpy as np
 import structlog
 import torch
-from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, HTTPException, Query, WebSocket, WebSocketDisconnect
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 from starlette.websockets import WebSocketState
@@ -20,6 +20,7 @@ from app.api.router_v2 import ModelRouter
 from app.api.shadow_mode import ShadowModeEvaluator
 from app.config import get_settings
 from app.database import SessionLocal
+from app.ml.active_learning import ActiveLearningQueue
 from app.ml.metrics import get_metrics_collector
 from app.ml.monitoring import DriftDetector
 from app.ml.pipeline import SignFlowInferencePipeline
@@ -37,6 +38,8 @@ _global_drift_detector: DriftDetector | None = None
 _global_model_router: ModelRouter | None = None
 _global_model_router_config: tuple[float, str | None, bool, str | None] | None = None
 _global_shadow_evaluator: ShadowModeEvaluator | None = None
+_global_active_learning_queue: ActiveLearningQueue | None = None
+_global_active_learning_config: tuple[str, float, int, int, float] | None = None
 _TOKEN_RE = re.compile(r"[a-zA-Z0-9_-]+")
 
 
@@ -78,6 +81,22 @@ def _extract_sentence_tokens(sentence_buffer: str) -> list[str]:
     if not sentence_buffer:
         return []
     return [token.lower() for token in _TOKEN_RE.findall(sentence_buffer)]
+
+
+def _to_optional_int(value: object) -> int | None:
+    """Best-effort integer parsing for frame metadata."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _to_optional_float(value: object) -> float | None:
+    """Best-effort float parsing for timestamp metadata."""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _increment_usage_counts(tokens: list[str]) -> None:
@@ -365,6 +384,36 @@ def get_or_create_drift_detector() -> DriftDetector:
     return _global_drift_detector
 
 
+def get_or_create_active_learning_queue() -> ActiveLearningQueue:
+    """Get or create shared active-learning uncertainty queue."""
+    global _global_active_learning_queue, _global_active_learning_config
+
+    settings = get_settings()
+    config_signature = (
+        settings.active_learning_strategy,
+        float(settings.active_learning_min_uncertainty),
+        int(settings.active_learning_max_queue),
+        int(settings.active_learning_top_n),
+        float(settings.active_learning_cooldown_seconds),
+    )
+
+    if (
+        _global_active_learning_queue is not None
+        and _global_active_learning_config == config_signature
+    ):
+        return _global_active_learning_queue
+
+    _global_active_learning_queue = ActiveLearningQueue(
+        strategy=settings.active_learning_strategy,
+        min_uncertainty=settings.active_learning_min_uncertainty,
+        max_size=settings.active_learning_max_queue,
+        top_n=settings.active_learning_top_n,
+        cooldown_seconds=settings.active_learning_cooldown_seconds,
+    )
+    _global_active_learning_config = config_signature
+    return _global_active_learning_queue
+
+
 def reload_pipeline() -> None:
     """Force reload of the global pipeline (called after training completes)."""
     global _global_pipeline, _global_model_router, _global_model_router_config
@@ -372,6 +421,46 @@ def reload_pipeline() -> None:
     _global_model_router = None
     _global_model_router_config = None
     logger.info("pipeline_reload_scheduled")
+
+
+@router.get("/active-learning/queue")
+def list_active_learning_queue(
+    limit: int = Query(default=20, ge=1, le=500),
+) -> dict[str, object]:
+    """List top uncertain samples queued for active-learning annotation."""
+    settings = get_settings()
+    if not settings.active_learning_enabled:
+        return {
+            "enabled": False,
+            "queue_size": 0,
+            "strategy": settings.active_learning_strategy,
+            "items": [],
+        }
+
+    queue = get_or_create_active_learning_queue()
+    items = [sample.to_dict() for sample in queue.top_uncertain(limit=limit)]
+    snapshot = queue.snapshot()
+    return {
+        "enabled": True,
+        "queue_size": int(snapshot["queue_size"]),
+        "strategy": snapshot["strategy"],
+        "items": items,
+    }
+
+
+@router.post("/active-learning/queue/{sample_id}/resolve")
+def resolve_active_learning_sample(sample_id: str) -> dict[str, object]:
+    """Resolve/remove one active-learning candidate after annotation."""
+    settings = get_settings()
+    if not settings.active_learning_enabled:
+        raise HTTPException(status_code=400, detail="Active learning is disabled")
+
+    queue = get_or_create_active_learning_queue()
+    sample = queue.resolve(sample_id)
+    if sample is None:
+        raise HTTPException(status_code=404, detail=f"Sample {sample_id} not found")
+
+    return {"resolved": True, "sample": sample.to_dict()}
 
 
 @router.websocket("/stream")
@@ -388,6 +477,11 @@ async def translate_stream(websocket: WebSocket) -> None:
     metrics_collector = get_metrics_collector()
     drift_detector = get_or_create_drift_detector() if settings.drift_detection_enabled else None
     shadow_evaluator = get_or_create_shadow_evaluator() if settings.shadow_mode_enabled else None
+    active_learning_queue = (
+        get_or_create_active_learning_queue()
+        if settings.active_learning_enabled
+        else None
+    )
     torchserve_client: TorchServeClient | None = None
     shadow_pipeline: SignFlowInferencePipeline | None = None
     route = "production"
@@ -566,6 +660,26 @@ async def translate_stream(websocket: WebSocket) -> None:
                     _increment_usage_counts(new_tokens)
                     counted_token_total = token_count
 
+                active_learning_hint: dict[str, object] | None = None
+                if active_learning_queue is not None:
+                    sample = active_learning_queue.consider(
+                        prediction=prediction.prediction,
+                        confidence=prediction.confidence,
+                        alternatives=prediction.alternatives,
+                        sentence_buffer=prediction.sentence_buffer,
+                        frame_idx=_to_optional_int(payload.get("frame_idx")),
+                        timestamp=_to_optional_float(payload.get("timestamp")),
+                        route=route,
+                        model_version=str(getattr(pipeline, "model_version", "unknown")),
+                    )
+                    if sample is not None:
+                        active_learning_hint = {
+                            "queued": True,
+                            "sample_id": sample.id,
+                            "uncertainty": round(sample.uncertainty, 4),
+                            "strategy": sample.strategy,
+                        }
+
                 # Send prediction to client
                 try:
                     await websocket.send_json(
@@ -576,6 +690,7 @@ async def translate_stream(websocket: WebSocket) -> None:
                             "sentence_buffer": prediction.sentence_buffer,
                             "is_sentence_complete": prediction.is_sentence_complete,
                             "decision_diagnostics": prediction.decision_diagnostics,
+                            "active_learning": active_learning_hint,
                             "latency_ms": round(latency_ms, 1),
                         }
                     )

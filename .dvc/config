@@ -1,0 +1,6 @@
+[core]
+    analytics = false
+    remote = signflow-storage
+
+['remote "signflow-storage"']
+    url = s3://signflow-datasets

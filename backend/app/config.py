@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from functools import lru_cache
+from typing import Literal
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -65,6 +66,12 @@ class Settings(BaseSettings):
     drift_min_samples: int = Field(default=200, ge=32, le=50000)
     drift_p_value_threshold: float = Field(default=0.05, ge=0.000001, le=1.0)
     drift_mean_shift_threshold: float = Field(default=0.12, ge=0.0, le=1.0)
+    active_learning_enabled: bool = False
+    active_learning_strategy: Literal["entropy", "margin", "combined"] = "combined"
+    active_learning_min_uncertainty: float = Field(default=0.6, ge=0.0, le=1.0)
+    active_learning_max_queue: int = Field(default=2000, ge=10, le=200000)
+    active_learning_top_n: int = Field(default=250, ge=1, le=10000)
+    active_learning_cooldown_seconds: float = Field(default=1.5, ge=0.0, le=60.0)
     mlflow_registry_enabled: bool = False
     mlflow_registry_model_name: str = "signflow-model"
     mlflow_registry_auto_promote_staging: bool = True
