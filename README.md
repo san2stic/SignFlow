@@ -170,13 +170,27 @@ npm run build
 
 ```bash
 cp .env.example .env
-# set SIGNFLOW_DOMAIN, POSTGRES_PASSWORD, and REDIS_PASSWORD
+# set POSTGRES_PASSWORD and REDIS_PASSWORD
 docker compose -f docker-compose.prod.yml up --build
 ```
 
 Caddy provides:
 - single-origin frontend + `/api/*` proxy
-- security headers (HSTS, nosniff, frame deny, permissions policy)
+- security headers (nosniff, frame deny, permissions policy)
+
+For HTTPS access over Tailnet:
+
+```bash
+/Applications/Tailscale.app/Contents/MacOS/Tailscale serve --https=443 --yes http://127.0.0.1:80
+```
+
+Automation script:
+
+```bash
+./scripts/expose-signflow-tailscale.sh start
+./scripts/expose-signflow-tailscale.sh status
+./scripts/expose-signflow-tailscale.sh stop
+```
 
 ## Known gaps
 

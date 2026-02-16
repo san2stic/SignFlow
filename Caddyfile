@@ -1,34 +1,7 @@
-{
-  auto_https disable_redirects
-}
-
 :80 {
   encode zstd gzip
 
   header {
-    X-Content-Type-Options "nosniff"
-    X-Frame-Options "DENY"
-    Referrer-Policy "strict-origin-when-cross-origin"
-    Permissions-Policy "camera=(self), microphone=(), geolocation=()"
-    -Server
-  }
-
-  @backend path /api/* /healthz /docs /redoc /openapi.json
-  reverse_proxy @backend backend:8000
-
-  @ws path /api/v1/translate/ws
-  reverse_proxy @ws backend:8000
-
-  reverse_proxy frontend:8080
-}
-
-https://{$SIGNFLOW_DOMAIN}, https://localhost, https://127.0.0.1 {
-  tls internal
-
-  encode zstd gzip
-
-  header {
-    Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
     X-Content-Type-Options "nosniff"
     X-Frame-Options "DENY"
     Referrer-Policy "strict-origin-when-cross-origin"
