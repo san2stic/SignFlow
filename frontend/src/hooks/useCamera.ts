@@ -11,6 +11,53 @@ interface ZoomCapability {
   step?: number;
 }
 
+export type CameraErrorCode =
+  | "insecure-context"
+  | "unsupported"
+  | "permission-denied"
+  | "device-not-found"
+  | "device-busy"
+  | "unknown";
+
+export interface CameraError {
+  code: CameraErrorCode;
+  message: string;
+}
+
+function toCameraError(error: unknown): CameraError {
+  const fallback: CameraError = {
+    code: "unknown",
+    message: "Impossible de demarrer la camera. Verifiez vos permissions navigateur."
+  };
+
+  if (typeof DOMException === "undefined" || !(error instanceof DOMException)) {
+    return fallback;
+  }
+
+  if (error.name === "NotAllowedError" || error.name === "SecurityError") {
+    return {
+      code: "permission-denied",
+      message: "Acces camera refuse. Autorisez la camera dans le navigateur et rechargez la page."
+    };
+  }
+
+  if (error.name === "NotFoundError" || error.name === "OverconstrainedError") {
+    return {
+      code: "device-not-found",
+      message: "Aucune camera compatible detectee sur cet appareil."
+    };
+  }
+
+  if (error.name === "NotReadableError" || error.name === "TrackStartError") {
+    return {
+      code: "device-busy",
+      message: "Camera indisponible. Fermez les autres apps qui utilisent deja la camera."
+    };
+  }
+
+  return fallback;
+}
+
 function preferredRecorderMimeType(): string | null {
   const candidates = [
     "video/mp4;codecs=avc1.42E01E,mp4a.40.2",
@@ -92,6 +139,7 @@ export function useCamera() {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const [facingMode, setFacingMode] = useState<"user" | "environment">("user");
   const [isReady, setIsReady] = useState(false);
+  const [error, setError] = useState<CameraError | null>(null);
 
   const streamRef = useRef<MediaStream | null>(null);
   const preRollRecorderRef = useRef<MediaRecorder | null>(null);
@@ -113,6 +161,7 @@ export function useCamera() {
 
     async function start(): Promise<void> {
       setIsReady(false);
+      setError(null);
 
       if (streamRef.current) {
         streamRef.current.getTracks().forEach((track) => track.stop());
@@ -123,6 +172,22 @@ export function useCamera() {
       }
       preRollRecorderRef.current = null;
       preRollChunksRef.current = [];
+
+      if (!window.isSecureContext) {
+        setError({
+          code: "insecure-context",
+          message: "Camera bloquee: utilisez HTTPS (obligatoire hors localhost)."
+        });
+        return;
+      }
+
+      if (!navigator.mediaDevices?.getUserMedia) {
+        setError({
+          code: "unsupported",
+          message: "Camera non supportee sur ce navigateur/appareil."
+        });
+        return;
+      }
 
       try {
         const stream = await getCameraStream(facingMode);
@@ -136,25 +201,32 @@ export function useCamera() {
         streamRef.current = stream;
 
         if (videoRef.current) {
-          await bindStreamToVideo(videoRef.current, stream);
+          await bindStreamToVideo(videoRef.current, stream).catch(() => {
+            // Keep camera active even if autoplay handshake is delayed.
+          });
         }
 
         if (typeof MediaRecorder !== "undefined") {
-          const preferredMimeType = preferredRecorderMimeType();
-          const recorder = preferredMimeType ? new MediaRecorder(stream, { mimeType: preferredMimeType }) : new MediaRecorder(stream);
-          recorder.ondataavailable = (event) => {
-            if (!event.data || event.data.size === 0) return;
-            preRollChunksRef.current.push({ blob: event.data, timestamp: Date.now() });
+          try {
+            const preferredMimeType = preferredRecorderMimeType();
+            const recorder = preferredMimeType ? new MediaRecorder(stream, { mimeType: preferredMimeType }) : new MediaRecorder(stream);
+            recorder.ondataavailable = (event) => {
+              if (!event.data || event.data.size === 0) return;
+              preRollChunksRef.current.push({ blob: event.data, timestamp: Date.now() });
 
-            const cutoff = Date.now() - 10_000;
-            preRollChunksRef.current = preRollChunksRef.current.filter((chunk) => chunk.timestamp >= cutoff);
-          };
-          recorder.start(250);
-          preRollRecorderRef.current = recorder;
+              const cutoff = Date.now() - 10_000;
+              preRollChunksRef.current = preRollChunksRef.current.filter((chunk) => chunk.timestamp >= cutoff);
+            };
+            recorder.start(250);
+            preRollRecorderRef.current = recorder;
+          } catch {
+            preRollRecorderRef.current = null;
+          }
         }
 
         setIsReady(true);
-      } catch {
+      } catch (cameraError) {
+        setError(toCameraError(cameraError));
         setIsReady(false);
       }
     }
@@ -192,5 +264,5 @@ export function useCamera() {
     return new Blob(recentChunks, { type: mimeType });
   };
 
-  return { videoRef, attachVideoRef, isReady, facingMode, toggleFacing, capturePreRollClip };
+  return { videoRef, attachVideoRef, isReady, error, facingMode, toggleFacing, capturePreRollClip };
 }

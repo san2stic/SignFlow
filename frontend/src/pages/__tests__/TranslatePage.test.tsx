@@ -31,6 +31,9 @@ vi.mock("../../hooks/useMediaPipe", () => ({
 vi.mock("../../hooks/useCamera", () => ({
   useCamera: () => ({
     videoRef: { current: null },
+    attachVideoRef: vi.fn(),
+    isReady: true,
+    error: null,
     toggleFacing: vi.fn(),
     capturePreRollClip: () => new Blob(["clip"], { type: "video/webm" })
   })

@@ -14,6 +14,7 @@ import { speak } from "../lib/speech";
 import { useSettingsStore } from "../stores/settingsStore";
 import { useTrainingStore } from "../stores/trainingStore";
 import { useTranslateStore } from "../stores/translateStore";
+import type { CameraError } from "../hooks/useCamera";
 
 interface StreamPayload {
   prediction: string;
@@ -29,12 +30,24 @@ const UNKNOWN_PROMPT_GRACE_MS = 700;
 const UNKNOWN_PROMPT_COOLDOWN_MS = 3000;
 const UNKNOWN_PROMPT_RECOVERY_CONFIDENCE = 0.7;
 
+function cameraHelpText(error: CameraError | null): string {
+  if (!error) {
+    return "Initialisation de la camera...";
+  }
+
+  if (error.code === "insecure-context") {
+    return "Acces refuse: en distant la camera fonctionne uniquement via HTTPS.";
+  }
+
+  return error.message;
+}
+
 export function TranslatePage(): JSX.Element {
   const navigate = useNavigate();
-  const { videoRef, attachVideoRef, toggleFacing, capturePreRollClip } = useCamera();
+  const { videoRef, attachVideoRef, isReady: cameraReady, error: cameraError, toggleFacing, capturePreRollClip } = useCamera();
   const { frame, ready } = useMediaPipe({
     videoRef,
-    enabled: true,
+    enabled: cameraReady,
     targetFps: 30,
     includeFace: false,
     modelComplexity: 2
@@ -411,8 +424,10 @@ export function TranslatePage(): JSX.Element {
               </motion.div>
             ) : (
               <div className="shimmer flex items-center gap-2 rounded-full px-3 py-1.5 backdrop-blur-sm">
-                <div className="h-2 w-2 animate-pulse rounded-full bg-text-tertiary" />
-                <span className="text-xs font-medium text-text-tertiary">Initialisation...</span>
+                <div className={`h-2 w-2 animate-pulse rounded-full ${cameraError ? "bg-red-400" : "bg-text-tertiary"}`} />
+                <span className={`text-xs font-medium ${cameraError ? "text-red-200" : "text-text-tertiary"}`}>
+                  {cameraError ? "Camera indisponible" : "Initialisation..."}
+                </span>
               </div>
             )}
 
@@ -450,7 +465,17 @@ export function TranslatePage(): JSX.Element {
               >
                 <div className="text-center">
                   <div className="shimmer mx-auto mb-4 h-16 w-16 rounded-full" />
-                  <p className="font-display text-lg text-text-secondary">Préparation de MediaPipe...</p>
+                  <p className="font-display text-lg text-text-secondary">
+                    {cameraError ? "Camera indisponible" : cameraReady ? "Preparation de MediaPipe..." : "Demarrage camera..."}
+                  </p>
+                  <p className={`mt-2 max-w-md text-sm ${cameraError ? "text-red-200" : "text-text-muted"}`}>
+                    {cameraHelpText(cameraError)}
+                  </p>
+                  {cameraError?.code === "insecure-context" && (
+                    <p className="mt-2 text-xs text-text-muted">
+                      Ouvre SignFlow en HTTPS (ex: via Caddy ou un tunnel SSL) puis recharge la page.
+                    </p>
+                  )}
                 </div>
               </motion.div>
             )}
