@@ -1,5 +1,5 @@
-const STATIC_CACHE = "signflow-static-v3";
-const DICTIONARY_CACHE = "signflow-dictionary-v3";
+const STATIC_CACHE = "signflow-static-v4";
+const DICTIONARY_CACHE = "signflow-dictionary-v4";
 const STATIC_ASSETS = ["/", "/index.html", "/manifest.json", "/icons/icon-192.svg", "/icons/icon-512.svg"];
 
 self.addEventListener("install", (event) => {
@@ -27,6 +27,10 @@ function isDictionaryRequest(url) {
     url.pathname.includes("/api/v1/signs") ||
     url.pathname.includes("/api/v1/stats/signs-per-category")
   );
+}
+
+function isApiRequest(url) {
+  return url.pathname.startsWith("/api/");
 }
 
 async function staleWhileRevalidate(request) {
@@ -63,12 +67,17 @@ self.addEventListener("fetch", (event) => {
   if (request.method !== "GET") return;
 
   const url = new URL(request.url);
+  if (url.origin !== self.location.origin) return;
+
   if (isDictionaryRequest(url)) {
     event.respondWith(staleWhileRevalidate(request));
     return;
   }
 
-  if (url.origin === self.location.origin) {
-    event.respondWith(cacheFirst(request));
+  if (isApiRequest(url)) {
+    event.respondWith(fetch(request));
+    return;
   }
+
+  event.respondWith(cacheFirst(request));
 });
