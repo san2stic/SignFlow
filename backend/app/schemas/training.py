@@ -51,6 +51,30 @@ class TrainingConfig(BaseModel):
     target_sign_f1_gate: float = Field(default=0.85, ge=0.0, le=1.0)
     open_set_fpr_gate: float = Field(default=0.05, ge=0.0, le=1.0)
     latency_p95_ms_gate: float = Field(default=120.0, ge=1.0, le=10000.0)
+    ece_gate: float = Field(default=0.12, ge=0.0, le=1.0)
+
+    # Imbalance handling
+    use_class_weights: bool = True
+    use_weighted_sampler: bool = False
+    use_focal_loss: bool = False
+    class_weight_power: float = Field(default=0.5, ge=0.0, le=2.0)
+    class_weight_min: float = Field(default=0.35, ge=0.01, le=10.0)
+    class_weight_max: float = Field(default=4.0, ge=0.05, le=50.0)
+    weighted_sampler_power: float = Field(default=0.75, ge=0.0, le=3.0)
+    weighted_sampler_min: float = Field(default=0.25, ge=0.01, le=10.0)
+    weighted_sampler_max: float = Field(default=5.0, ge=0.05, le=50.0)
+
+    # Threshold tuning
+    threshold_objective: Literal["fbeta", "cost"] = "fbeta"
+    threshold_beta: float = Field(default=1.5, ge=0.1, le=5.0)
+    threshold_fp_cost: float = Field(default=1.0, ge=0.0, le=100.0)
+    threshold_fn_cost: float = Field(default=1.5, ge=0.0, le=100.0)
+
+    # Evaluation extensions
+    cv_enabled: bool = True
+    cv_k_folds: int = Field(default=5, ge=2, le=10)
+    interpretability_enabled: bool = True
+    interpretability_max_samples: int = Field(default=64, ge=16, le=512)
 
 
 class TrainingMetrics(BaseModel):

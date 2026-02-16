@@ -21,6 +21,7 @@ class _Prediction:
     alternatives: list[dict[str, float]]
     sentence_buffer: str
     is_sentence_complete: bool
+    decision_diagnostics: dict[str, object] | None = None
 
 
 class _FakePipeline:
@@ -48,6 +49,7 @@ class _FakePipeline:
             alternatives=[],
             sentence_buffer=sentence,
             is_sentence_complete=False,
+            decision_diagnostics={"status": "accepted"},
         )
 
 
@@ -68,6 +70,7 @@ class _PerSessionPipeline:
             alternatives=[],
             sentence_buffer=sentence,
             is_sentence_complete=False,
+            decision_diagnostics={"status": "accepted"},
         )
 
 
@@ -163,3 +166,26 @@ def test_translate_stream_isolates_state_between_two_sessions(monkeypatch) -> No
     assert response_one_second["sentence_buffer"] == f"{slug} {slug}"
     assert response_two_second["sentence_buffer"] == f"{slug} {slug}"
     assert [session.calls for session in template.sessions] == [2, 2]
+
+
+def test_translate_stream_returns_decision_diagnostics(monkeypatch) -> None:
+    """Translate websocket should expose decision diagnostics payload for auditing."""
+    suffix = uuid4().hex[:8]
+    slug = f"lsfb_diag_{suffix}"
+    fake_pipeline = _FakePipeline(slug=slug)
+    monkeypatch.setattr(translate_api, "get_or_create_pipeline", lambda: fake_pipeline)
+
+    payload = {
+        "timestamp": 0.0,
+        "frame_idx": 1,
+        "hands": {"left": [[0.1, 0.1, 0.0]] * 21, "right": [[0.1, 0.1, 0.0]] * 21},
+        "pose": [[0.2, 0.2, 0.0]] * 33,
+    }
+
+    with TestClient(app) as client:
+        with client.websocket_connect("/api/v1/translate/stream") as websocket:
+            websocket.send_json(payload)
+            response = websocket.receive_json()
+
+    assert "decision_diagnostics" in response
+    assert response["decision_diagnostics"]["status"] == "accepted"

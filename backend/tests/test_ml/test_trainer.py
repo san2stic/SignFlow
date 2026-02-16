@@ -43,3 +43,19 @@ def test_trainer_cpu_disables_amp_even_if_requested() -> None:
 
     trainer = SignTrainer(model=model, config=config)
     assert trainer.autocast_enabled is False
+
+
+def test_stable_inverse_frequency_weights_are_clipped_and_normalized() -> None:
+    """Stable class-imbalance weights should remain bounded and finite."""
+    counts = torch.tensor([50, 5, 1], dtype=torch.float32).numpy()
+    weights = SignTrainer._stable_inverse_frequency_weights(
+        counts,
+        power=0.75,
+        min_weight=0.3,
+        max_weight=3.0,
+    )
+
+    assert weights.shape == (3,)
+    assert float(weights.min()) >= 0.3
+    assert float(weights.max()) <= 3.0
+    assert weights[0] <= weights[1] <= weights[2]

@@ -312,6 +312,7 @@ async def translate_stream(websocket: WebSocket) -> None:
                             "alternatives": prediction.alternatives,
                             "sentence_buffer": prediction.sentence_buffer,
                             "is_sentence_complete": prediction.is_sentence_complete,
+                            "decision_diagnostics": prediction.decision_diagnostics,
                             "latency_ms": round(latency_ms, 1),
                         }
                     )

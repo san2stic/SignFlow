@@ -69,6 +69,14 @@ class TrainingConfig:
     distillation_alpha: float = 0.25
     distillation_temperature: float = 2.0
 
+    # Stable imbalance controls.
+    class_weight_power: float = 0.5
+    class_weight_min: float = 0.35
+    class_weight_max: float = 4.0
+    weighted_sampler_power: float = 0.75
+    weighted_sampler_min: float = 0.25
+    weighted_sampler_max: float = 5.0
+
 
 @dataclass
 class TrainingMetrics:
@@ -270,6 +278,24 @@ class SignTrainer:
             return np.array([], dtype=np.int64), np.array([], dtype=np.int64)
         return np.unique(np.array(labels, dtype=np.int64), return_counts=True)
 
+    @staticmethod
+    def _stable_inverse_frequency_weights(
+        counts: np.ndarray,
+        *,
+        power: float,
+        min_weight: float,
+        max_weight: float,
+    ) -> np.ndarray:
+        """Compute numerically stable inverse-frequency style weights with clipping."""
+        if counts.size == 0:
+            return np.array([], dtype=np.float32)
+        base = np.maximum(counts.astype(np.float32), 1.0)
+        normalized = base / max(float(np.mean(base)), 1e-6)
+        inv = 1.0 / np.power(normalized, max(0.0, float(power)))
+        inv = inv / max(float(np.mean(inv)), 1e-6)
+        inv = np.clip(inv, float(min_weight), float(max_weight)).astype(np.float32)
+        return inv
+
     def _configure_criterion(self, train_dataset: LandmarkDataset) -> None:
         """Configure criterion using class weights from train set if requested."""
         class_weights_tensor: torch.Tensor | None = None
@@ -277,8 +303,12 @@ class SignTrainer:
         if self.config.use_class_weights and len(class_ids) > 0:
             num_classes = self.model.num_classes
             weights = np.ones((num_classes,), dtype=np.float32)
-            inv = 1.0 / np.maximum(counts.astype(np.float32), 1.0)
-            inv = inv / max(inv.mean(), 1e-6)
+            inv = self._stable_inverse_frequency_weights(
+                counts,
+                power=self.config.class_weight_power,
+                min_weight=self.config.class_weight_min,
+                max_weight=self.config.class_weight_max,
+            )
             for class_id, value in zip(class_ids.tolist(), inv.tolist()):
                 if 0 <= class_id < num_classes:
                     weights[class_id] = float(value)
@@ -305,9 +335,15 @@ class SignTrainer:
         if self.config.use_weighted_sampler and len(train_dataset) > 0:
             class_ids, counts = self._class_distribution(train_dataset)
             if len(class_ids) > 0:
+                inv = self._stable_inverse_frequency_weights(
+                    counts,
+                    power=self.config.weighted_sampler_power,
+                    min_weight=self.config.weighted_sampler_min,
+                    max_weight=self.config.weighted_sampler_max,
+                )
                 class_to_weight = {
-                    int(class_id): float(1.0 / max(1, count))
-                    for class_id, count in zip(class_ids.tolist(), counts.tolist())
+                    int(class_id): float(weight)
+                    for class_id, weight in zip(class_ids.tolist(), inv.tolist())
                 }
                 sample_weights = [
                     class_to_weight.get(int(label), 1.0)
@@ -823,6 +859,12 @@ class SignTrainer:
                 "use_distillation": self.config.use_distillation,
                 "distillation_alpha": self.config.distillation_alpha,
                 "distillation_temperature": self.config.distillation_temperature,
+                "class_weight_power": self.config.class_weight_power,
+                "class_weight_min": self.config.class_weight_min,
+                "class_weight_max": self.config.class_weight_max,
+                "weighted_sampler_power": self.config.weighted_sampler_power,
+                "weighted_sampler_min": self.config.weighted_sampler_min,
+                "weighted_sampler_max": self.config.weighted_sampler_max,
             },
             "metrics_history": [
                 {

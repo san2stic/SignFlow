@@ -12,6 +12,14 @@ import time
 import numpy as np
 import structlog
 import torch
+from sklearn.metrics import (
+    average_precision_score,
+    confusion_matrix,
+    f1_score,
+    precision_recall_fscore_support,
+    roc_auc_score,
+)
+from sklearn.model_selection import StratifiedKFold
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 from torch.utils.data import DataLoader
@@ -20,6 +28,7 @@ from app.config import get_settings
 from app.database import SessionLocal
 from app.ml.augmentation import augment_dataset
 from app.ml.dataset import LandmarkDataset, SignSample, load_landmarks_from_file
+from app.ml.feature_engineering import ENRICHED_FEATURE_DIM
 from app.ml.fewshot import prepare_few_shot_model
 from app.ml.model import SignTransformer
 from app.ml.prototypical import run_prototypical_fallback
@@ -517,13 +526,28 @@ class TrainingService:
         probs: np.ndarray,
         labels: np.ndarray,
         class_labels: list[str],
+        *,
+        objective: str = "fbeta",
+        beta: float = 1.0,
+        fp_cost: float = 1.0,
+        fn_cost: float = 1.0,
+        candidates: np.ndarray | None = None,
     ) -> dict[str, float]:
         """Learn per-class confidence thresholds from validation predictions."""
         if probs.size == 0 or labels.size == 0:
             return {}
 
         thresholds: dict[str, float] = {}
-        candidates = np.linspace(0.35, 0.95, 13)
+        candidate_values = (
+            np.asarray(candidates, dtype=np.float32)
+            if candidates is not None
+            else np.linspace(0.25, 0.95, 15, dtype=np.float32)
+        )
+        objective_normalized = str(objective or "fbeta").strip().lower()
+        beta_value = float(max(0.1, beta))
+        fp_weight = float(max(0.0, fp_cost))
+        fn_weight = float(max(0.0, fn_cost))
+
         for class_index, class_label in enumerate(class_labels):
             y_true = (labels == class_index).astype(np.int32)
             if int(np.sum(y_true)) == 0:
@@ -531,12 +555,37 @@ class TrainingService:
                 continue
 
             best_threshold = 0.7
-            best_f1 = -1.0
-            for candidate in candidates:
+            best_score = -float("inf")
+            best_fbeta = -1.0
+            for candidate in candidate_values:
                 y_pred = (probs[:, class_index] >= candidate).astype(np.int32)
-                score = TrainingService._binary_f1(y_true, y_pred)
-                if score > best_f1:
-                    best_f1 = score
+                tp = int(np.sum((y_true == 1) & (y_pred == 1)))
+                fp = int(np.sum((y_true == 0) & (y_pred == 1)))
+                fn = int(np.sum((y_true == 1) & (y_pred == 0)))
+
+                precision = tp / max(1, tp + fp)
+                recall = tp / max(1, tp + fn)
+                beta_sq = beta_value * beta_value
+                if precision + recall <= 0:
+                    fbeta = 0.0
+                else:
+                    fbeta = ((1.0 + beta_sq) * precision * recall) / max(
+                        1e-9,
+                        (beta_sq * precision) + recall,
+                    )
+
+                cost = (fp_weight * fp) + (fn_weight * fn)
+                if objective_normalized == "cost":
+                    score = -float(cost)
+                else:
+                    # Explicit objective: maximize F-beta; ties broken by lower FP/FN cost.
+                    score = float(fbeta) - (0.02 * float(cost / max(1, y_true.shape[0])))
+
+                if score > best_score or (
+                    abs(score - best_score) < 1e-12 and fbeta > best_fbeta
+                ):
+                    best_score = float(score)
+                    best_fbeta = float(fbeta)
                     best_threshold = float(candidate)
             thresholds[class_label] = float(best_threshold)
         return thresholds
@@ -679,6 +728,119 @@ class TrainingService:
         return float(np.clip(ece, 0.0, 1.0))
 
     @staticmethod
+    def _compute_brier_score(
+        *,
+        probs: np.ndarray,
+        y_true: np.ndarray,
+    ) -> float | None:
+        """Compute multiclass Brier score (mean squared error over one-hot targets)."""
+        if probs.ndim != 2 or probs.size == 0 or y_true.size == 0:
+            return None
+
+        sample_count = min(int(probs.shape[0]), int(y_true.shape[0]))
+        if sample_count <= 0:
+            return None
+
+        probs = probs[:sample_count]
+        y_true = y_true[:sample_count]
+        num_classes = int(probs.shape[1])
+        if num_classes <= 1:
+            return None
+
+        valid_mask = (y_true >= 0) & (y_true < num_classes)
+        if int(np.sum(valid_mask)) == 0:
+            return None
+
+        probs = probs[valid_mask]
+        y_true = y_true[valid_mask]
+        targets = np.zeros_like(probs, dtype=np.float32)
+        targets[np.arange(y_true.shape[0]), y_true.astype(np.int64)] = 1.0
+        score = np.mean(np.sum((probs.astype(np.float32) - targets) ** 2, axis=1))
+        return float(score)
+
+    @staticmethod
+    def _safe_multiclass_auc_metrics(
+        *,
+        probs: np.ndarray,
+        y_true: np.ndarray,
+    ) -> dict[str, object]:
+        """Compute ROC-AUC OVR macro and PR-AUC macro with explicit unavailable reasons."""
+        unavailable_reasons: dict[str, str] = {}
+        metrics: dict[str, object] = {
+            "roc_auc_ovr_macro": None,
+            "pr_auc_macro": None,
+            "unavailable_reasons": unavailable_reasons,
+        }
+
+        if probs.ndim != 2 or probs.size == 0 or y_true.size == 0:
+            unavailable_reasons["roc_auc_ovr_macro"] = "missing_probabilities_or_labels"
+            unavailable_reasons["pr_auc_macro"] = "missing_probabilities_or_labels"
+            return metrics
+
+        sample_count = min(int(probs.shape[0]), int(y_true.shape[0]))
+        probs = probs[:sample_count]
+        y_true = y_true[:sample_count]
+
+        num_classes = int(probs.shape[1])
+        if num_classes <= 1:
+            unavailable_reasons["roc_auc_ovr_macro"] = "requires_at_least_two_classes"
+            unavailable_reasons["pr_auc_macro"] = "requires_at_least_two_classes"
+            return metrics
+
+        valid_mask = (y_true >= 0) & (y_true < num_classes)
+        if int(np.sum(valid_mask)) == 0:
+            unavailable_reasons["roc_auc_ovr_macro"] = "no_valid_labels"
+            unavailable_reasons["pr_auc_macro"] = "no_valid_labels"
+            return metrics
+
+        probs = probs[valid_mask].astype(np.float64)
+        y_true = y_true[valid_mask].astype(np.int64)
+        if probs.shape[0] < 2:
+            unavailable_reasons["roc_auc_ovr_macro"] = "insufficient_samples"
+            unavailable_reasons["pr_auc_macro"] = "insufficient_samples"
+            return metrics
+
+        present_classes = np.unique(y_true)
+        if present_classes.size < 2:
+            unavailable_reasons["roc_auc_ovr_macro"] = "single_class_ground_truth"
+            unavailable_reasons["pr_auc_macro"] = "single_class_ground_truth"
+            return metrics
+
+        binary_targets = np.zeros((y_true.shape[0], num_classes), dtype=np.int32)
+        binary_targets[np.arange(y_true.shape[0]), y_true] = 1
+
+        auc_roc_values: list[float] = []
+        auc_pr_values: list[float] = []
+        for class_index in range(num_classes):
+            class_truth = binary_targets[:, class_index]
+            positives = int(np.sum(class_truth == 1))
+            negatives = int(np.sum(class_truth == 0))
+            if positives == 0 or negatives == 0:
+                continue
+
+            class_probs = probs[:, class_index]
+            try:
+                auc_roc_values.append(float(roc_auc_score(class_truth, class_probs)))
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                auc_pr_values.append(float(average_precision_score(class_truth, class_probs)))
+            except Exception:  # noqa: BLE001
+                pass
+
+        if auc_roc_values:
+            metrics["roc_auc_ovr_macro"] = float(np.mean(auc_roc_values))
+        else:
+            unavailable_reasons["roc_auc_ovr_macro"] = "no_class_with_positive_and_negative_examples"
+
+        if auc_pr_values:
+            metrics["pr_auc_macro"] = float(np.mean(auc_pr_values))
+        else:
+            unavailable_reasons["pr_auc_macro"] = "no_class_with_positive_and_negative_examples"
+
+        return metrics
+
+    @staticmethod
     def _label_name_for_index(class_labels: list[str], class_index: int) -> str:
         """Resolve display label for class index with safe fallback."""
         if 0 <= int(class_index) < len(class_labels):
@@ -775,62 +937,253 @@ class TrainingService:
         }
 
     @staticmethod
-    def _compute_per_class_metrics(
+    def _compute_full_confusion_matrix(
         *,
         y_true: np.ndarray,
         y_pred: np.ndarray,
         class_labels: list[str],
-    ) -> list[dict[str, float | int | str]]:
-        """Compute per-class precision/recall/f1/support with robust fallbacks."""
+    ) -> dict[str, object]:
+        """Build full confusion matrix and row-normalized variant with unavailable handling."""
         if y_true.size == 0 or y_pred.size == 0:
-            return []
+            return {
+                "labels": [],
+                "matrix": [],
+                "normalized": [],
+                "support": [],
+                "unavailable_reason": "empty_targets_or_predictions",
+            }
 
         sample_count = min(int(y_true.shape[0]), int(y_pred.shape[0]))
         y_true = y_true[:sample_count]
         y_pred = y_pred[:sample_count]
 
-        inferred_classes = int(max(int(np.max(y_true)), int(np.max(y_pred))) + 1)
+        if sample_count <= 0:
+            return {
+                "labels": [],
+                "matrix": [],
+                "normalized": [],
+                "support": [],
+                "unavailable_reason": "empty_aligned_samples",
+            }
+
+        max_true = int(np.max(y_true)) if y_true.size > 0 else -1
+        max_pred = int(np.max(y_pred)) if y_pred.size > 0 else -1
+        inferred_classes = int(max(max_true, max_pred) + 1)
         num_classes = max(len(class_labels), inferred_classes)
         if num_classes <= 0:
-            return []
+            return {
+                "labels": [],
+                "matrix": [],
+                "normalized": [],
+                "support": [],
+                "unavailable_reason": "no_class_dimension",
+            }
 
         valid_true = (y_true >= 0) & (y_true < num_classes)
         valid_pred = (y_pred >= 0) & (y_pred < num_classes)
         paired_valid = valid_true & valid_pred
         if int(np.sum(paired_valid)) == 0:
-            return []
+            return {
+                "labels": [],
+                "matrix": [],
+                "normalized": [],
+                "support": [],
+                "unavailable_reason": "no_valid_class_indices",
+            }
+
+        y_true_valid = y_true[paired_valid].astype(np.int64)
+        y_pred_valid = y_pred[paired_valid].astype(np.int64)
+        indices = list(range(num_classes))
+        matrix = confusion_matrix(y_true_valid, y_pred_valid, labels=indices)
+        matrix = matrix.astype(np.int64)
+
+        row_sums = matrix.sum(axis=1, keepdims=True).astype(np.float64)
+        normalized = np.divide(
+            matrix.astype(np.float64),
+            np.clip(row_sums, 1.0, None),
+            out=np.zeros_like(matrix, dtype=np.float64),
+            where=row_sums > 0,
+        )
+
+        support = matrix.sum(axis=1).astype(np.int64)
+        labels = [TrainingService._label_name_for_index(class_labels, i) for i in indices]
+
+        return {
+            "labels": labels,
+            "matrix": matrix.tolist(),
+            "normalized": np.round(normalized, 4).tolist(),
+            "support": support.tolist(),
+            "unavailable_reason": None,
+            "sample_count": int(y_true_valid.shape[0]),
+        }
+
+    @staticmethod
+    def _compute_per_class_metrics(
+        *,
+        y_true: np.ndarray,
+        y_pred: np.ndarray,
+        class_labels: list[str],
+    ) -> tuple[list[dict[str, float | int | str]], str | None]:
+        """Compute per-class precision/recall/f1/support with robust fallbacks."""
+        if y_true.size == 0 or y_pred.size == 0:
+            return [], "empty_targets_or_predictions"
+
+        sample_count = min(int(y_true.shape[0]), int(y_pred.shape[0]))
+        y_true = y_true[:sample_count]
+        y_pred = y_pred[:sample_count]
+        if sample_count <= 0:
+            return [], "empty_aligned_samples"
+
+        inferred_classes = int(max(int(np.max(y_true)), int(np.max(y_pred))) + 1)
+        num_classes = max(len(class_labels), inferred_classes)
+        if num_classes <= 0:
+            return [], "no_class_dimension"
+
+        valid_true = (y_true >= 0) & (y_true < num_classes)
+        valid_pred = (y_pred >= 0) & (y_pred < num_classes)
+        paired_valid = valid_true & valid_pred
+        if int(np.sum(paired_valid)) == 0:
+            return [], "no_valid_class_indices"
 
         y_true_valid = y_true[paired_valid]
         y_pred_valid = y_pred[paired_valid]
 
-        present_indices = sorted(
-            set(int(value) for value in y_true_valid.tolist())
-            | set(int(value) for value in y_pred_valid.tolist())
+        labels = list(range(num_classes))
+        precision, recall, f1, support = precision_recall_fscore_support(
+            y_true_valid,
+            y_pred_valid,
+            labels=labels,
+            average=None,
+            zero_division=0,
         )
 
         metrics: list[dict[str, float | int | str]] = []
-        for class_index in present_indices:
-            tp = int(np.sum((y_true_valid == class_index) & (y_pred_valid == class_index)))
-            fp = int(np.sum((y_true_valid != class_index) & (y_pred_valid == class_index)))
-            fn = int(np.sum((y_true_valid == class_index) & (y_pred_valid != class_index)))
-            support = int(np.sum(y_true_valid == class_index))
-
-            precision = tp / max(1, tp + fp)
-            recall = tp / max(1, tp + fn)
-            f1 = (2.0 * precision * recall / (precision + recall)) if (precision + recall) > 0 else 0.0
-
+        for class_index in labels:
             metrics.append(
                 {
                     "label": TrainingService._label_name_for_index(class_labels, class_index),
                     "index": int(class_index),
-                    "precision": round(float(precision), 4),
-                    "recall": round(float(recall), 4),
-                    "f1": round(float(f1), 4),
-                    "support": support,
+                    "precision": round(float(precision[class_index]), 4),
+                    "recall": round(float(recall[class_index]), 4),
+                    "f1": round(float(f1[class_index]), 4),
+                    "support": int(support[class_index]),
                 }
             )
 
-        return metrics
+        return metrics, None
+
+    @staticmethod
+    def _compute_aggregate_prf_metrics(
+        *,
+        y_true: np.ndarray,
+        y_pred: np.ndarray,
+        class_labels: list[str],
+    ) -> dict[str, object]:
+        """Compute macro/weighted precision-recall-f1 with robust unavailable reasons."""
+        unavailable_reasons: dict[str, str] = {}
+        result: dict[str, object] = {
+            "precision_macro": None,
+            "recall_macro": None,
+            "f1_macro": None,
+            "precision_weighted": None,
+            "recall_weighted": None,
+            "f1_weighted": None,
+            "unavailable_reasons": unavailable_reasons,
+        }
+
+        if y_true.size == 0 or y_pred.size == 0:
+            reason = "empty_targets_or_predictions"
+            unavailable_reasons.update(
+                {
+                    "precision_macro": reason,
+                    "recall_macro": reason,
+                    "f1_macro": reason,
+                    "precision_weighted": reason,
+                    "recall_weighted": reason,
+                    "f1_weighted": reason,
+                }
+            )
+            return result
+
+        sample_count = min(int(y_true.shape[0]), int(y_pred.shape[0]))
+        y_true = y_true[:sample_count]
+        y_pred = y_pred[:sample_count]
+        if sample_count <= 0:
+            reason = "empty_aligned_samples"
+            unavailable_reasons.update(
+                {
+                    "precision_macro": reason,
+                    "recall_macro": reason,
+                    "f1_macro": reason,
+                    "precision_weighted": reason,
+                    "recall_weighted": reason,
+                    "f1_weighted": reason,
+                }
+            )
+            return result
+
+        inferred_classes = int(max(int(np.max(y_true)), int(np.max(y_pred))) + 1)
+        num_classes = max(len(class_labels), inferred_classes)
+        if num_classes <= 0:
+            reason = "no_class_dimension"
+            unavailable_reasons.update(
+                {
+                    "precision_macro": reason,
+                    "recall_macro": reason,
+                    "f1_macro": reason,
+                    "precision_weighted": reason,
+                    "recall_weighted": reason,
+                    "f1_weighted": reason,
+                }
+            )
+            return result
+
+        valid_true = (y_true >= 0) & (y_true < num_classes)
+        valid_pred = (y_pred >= 0) & (y_pred < num_classes)
+        paired_valid = valid_true & valid_pred
+        if int(np.sum(paired_valid)) == 0:
+            reason = "no_valid_class_indices"
+            unavailable_reasons.update(
+                {
+                    "precision_macro": reason,
+                    "recall_macro": reason,
+                    "f1_macro": reason,
+                    "precision_weighted": reason,
+                    "recall_weighted": reason,
+                    "f1_weighted": reason,
+                }
+            )
+            return result
+
+        y_true_valid = y_true[paired_valid]
+        y_pred_valid = y_pred[paired_valid]
+        labels = list(range(num_classes))
+        macro = precision_recall_fscore_support(
+            y_true_valid,
+            y_pred_valid,
+            labels=labels,
+            average="macro",
+            zero_division=0,
+        )
+        weighted = precision_recall_fscore_support(
+            y_true_valid,
+            y_pred_valid,
+            labels=labels,
+            average="weighted",
+            zero_division=0,
+        )
+
+        result.update(
+            {
+                "precision_macro": float(macro[0]),
+                "recall_macro": float(macro[1]),
+                "f1_macro": float(macro[2]),
+                "precision_weighted": float(weighted[0]),
+                "recall_weighted": float(weighted[1]),
+                "f1_weighted": float(weighted[2]),
+            }
+        )
+        return result
 
     @staticmethod
     def _extract_weakest_classes(
@@ -852,6 +1205,253 @@ class TrainingService:
         return ranked[: max(1, int(top_k))]
 
     @staticmethod
+    def _compute_cv_summary(
+        *,
+        probs: np.ndarray,
+        y_true: np.ndarray,
+        class_labels: list[str],
+        k_folds: int = 5,
+        threshold_objective: str = "fbeta",
+        threshold_beta: float = 1.0,
+        threshold_fp_cost: float = 1.0,
+        threshold_fn_cost: float = 1.0,
+    ) -> dict[str, object]:
+        """Compute stratified CV summary for macro/weighted F1 with holdout fallback."""
+        summary: dict[str, object] = {
+            "mode": "unavailable",
+            "k_folds_requested": int(max(2, k_folds)),
+            "k_folds_used": 0,
+            "f1_macro_mean": None,
+            "f1_macro_std": None,
+            "f1_weighted_mean": None,
+            "f1_weighted_std": None,
+            "folds": [],
+            "unavailable_reason": None,
+        }
+
+        if probs.ndim != 2 or probs.size == 0 or y_true.size == 0:
+            summary["unavailable_reason"] = "missing_probabilities_or_labels"
+            return summary
+
+        sample_count = min(int(probs.shape[0]), int(y_true.shape[0]))
+        probs = probs[:sample_count]
+        y_true = y_true[:sample_count].astype(np.int64)
+        if sample_count < 2:
+            summary["unavailable_reason"] = "insufficient_samples"
+            return summary
+
+        num_classes = int(probs.shape[1])
+        valid_mask = (y_true >= 0) & (y_true < num_classes)
+        probs = probs[valid_mask]
+        y_true = y_true[valid_mask]
+        if y_true.size < 2:
+            summary["unavailable_reason"] = "insufficient_valid_samples"
+            return summary
+
+        unique_classes, counts = np.unique(y_true, return_counts=True)
+        if unique_classes.size < 2:
+            summary["unavailable_reason"] = "single_class_ground_truth"
+            return summary
+
+        min_count = int(np.min(counts))
+        requested_folds = int(max(2, k_folds))
+        usable_folds = min(requested_folds, min_count)
+
+        fold_results: list[dict[str, object]] = []
+
+        def _compute_fold_metrics(test_true: np.ndarray, test_pred: np.ndarray) -> tuple[float, float]:
+            macro = float(f1_score(test_true, test_pred, average="macro", zero_division=0))
+            weighted = float(f1_score(test_true, test_pred, average="weighted", zero_division=0))
+            return macro, weighted
+
+        if usable_folds >= 2:
+            summary["mode"] = "stratified_kfold"
+            summary["k_folds_used"] = int(usable_folds)
+            skf = StratifiedKFold(n_splits=usable_folds, shuffle=True, random_state=42)
+            for fold_index, (train_idx, test_idx) in enumerate(skf.split(probs, y_true), start=1):
+                train_probs = probs[train_idx]
+                train_labels = y_true[train_idx]
+                test_probs = probs[test_idx]
+                test_labels = y_true[test_idx]
+
+                thresholds = TrainingService._learn_class_thresholds(
+                    train_probs,
+                    train_labels,
+                    class_labels,
+                    objective=threshold_objective,
+                    beta=threshold_beta,
+                    fp_cost=threshold_fp_cost,
+                    fn_cost=threshold_fn_cost,
+                )
+                test_pred = TrainingService._predict_with_thresholds(
+                    test_probs,
+                    class_labels=class_labels,
+                    class_thresholds=thresholds,
+                )
+                macro, weighted = _compute_fold_metrics(test_labels, test_pred)
+                fold_results.append(
+                    {
+                        "fold": int(fold_index),
+                        "samples": int(test_labels.shape[0]),
+                        "f1_macro": round(macro, 4),
+                        "f1_weighted": round(weighted, 4),
+                    }
+                )
+        else:
+            summary["mode"] = "holdout_fallback"
+            summary["k_folds_used"] = 1
+            thresholds = TrainingService._learn_class_thresholds(
+                probs,
+                y_true,
+                class_labels,
+                objective=threshold_objective,
+                beta=threshold_beta,
+                fp_cost=threshold_fp_cost,
+                fn_cost=threshold_fn_cost,
+            )
+            decoded = TrainingService._predict_with_thresholds(
+                probs,
+                class_labels=class_labels,
+                class_thresholds=thresholds,
+            )
+            macro, weighted = _compute_fold_metrics(y_true, decoded)
+            fold_results.append(
+                {
+                    "fold": 1,
+                    "samples": int(y_true.shape[0]),
+                    "f1_macro": round(macro, 4),
+                    "f1_weighted": round(weighted, 4),
+                    "note": "fallback_non_stratified_holdout",
+                }
+            )
+
+        macro_values = np.array([float(item["f1_macro"]) for item in fold_results], dtype=np.float32)
+        weighted_values = np.array([float(item["f1_weighted"]) for item in fold_results], dtype=np.float32)
+        summary["f1_macro_mean"] = round(float(np.mean(macro_values)), 4) if macro_values.size else None
+        summary["f1_macro_std"] = round(float(np.std(macro_values, ddof=0)), 4) if macro_values.size else None
+        summary["f1_weighted_mean"] = (
+            round(float(np.mean(weighted_values)), 4) if weighted_values.size else None
+        )
+        summary["f1_weighted_std"] = (
+            round(float(np.std(weighted_values, ddof=0)), 4) if weighted_values.size else None
+        )
+        summary["folds"] = fold_results
+        return summary
+
+    @staticmethod
+    def _compute_feature_group_interpretability(
+        *,
+        model: SignTransformer,
+        dataset: LandmarkDataset,
+        device: str,
+        class_labels: list[str],
+        calibration_temperature: float,
+        class_thresholds: dict[str, float],
+        max_samples: int = 64,
+    ) -> dict[str, object]:
+        """Estimate feature-group importance using pragmatic ablation on validation windows."""
+        report: dict[str, object] = {
+            "method": "ablation_feature_groups",
+            "groups": [],
+            "baseline_f1_macro": None,
+            "sample_count": 0,
+            "unavailable_reason": None,
+        }
+        if len(dataset) == 0:
+            report["unavailable_reason"] = "empty_dataset"
+            return report
+
+        sample_count = min(int(max_samples), len(dataset))
+        if sample_count <= 1:
+            report["unavailable_reason"] = "insufficient_samples"
+            return report
+
+        selected_indices = np.linspace(0, len(dataset) - 1, num=sample_count, dtype=np.int64)
+        windows: list[np.ndarray] = []
+        labels: list[int] = []
+        for idx in selected_indices.tolist():
+            sequence, label = dataset[int(idx)]
+            if isinstance(sequence, torch.Tensor):
+                windows.append(sequence.detach().cpu().numpy().astype(np.float32))
+            else:
+                windows.append(np.asarray(sequence, dtype=np.float32))
+            labels.append(int(label))
+
+        inputs = np.stack(windows, axis=0)
+        y_true = np.asarray(labels, dtype=np.int64)
+        report["sample_count"] = int(inputs.shape[0])
+
+        if inputs.ndim != 3 or inputs.shape[2] <= 0:
+            report["unavailable_reason"] = "invalid_feature_tensor"
+            return report
+
+        if int(np.unique(y_true).size) < 2:
+            report["unavailable_reason"] = "single_class_ground_truth"
+            return report
+
+        torch_device = torch.device(device)
+        model = model.to(torch_device)
+        model.eval()
+
+        def _predict_probs(batch_inputs: np.ndarray) -> np.ndarray:
+            batch_size = 32
+            logits_parts: list[np.ndarray] = []
+            with torch.no_grad():
+                for start in range(0, batch_inputs.shape[0], batch_size):
+                    stop = min(batch_inputs.shape[0], start + batch_size)
+                    tensor = torch.from_numpy(batch_inputs[start:stop]).float().to(torch_device)
+                    logits = model(tensor)
+                    logits_parts.append(logits.detach().cpu().numpy())
+            logits_all = np.concatenate(logits_parts, axis=0).astype(np.float32)
+            return TrainingService._apply_temperature(logits_all, calibration_temperature)
+
+        baseline_probs = _predict_probs(inputs)
+        baseline_pred = TrainingService._predict_with_thresholds(
+            baseline_probs,
+            class_labels=class_labels,
+            class_thresholds=class_thresholds,
+        )
+        baseline_f1 = float(f1_score(y_true, baseline_pred, average="macro", zero_division=0))
+        report["baseline_f1_macro"] = round(baseline_f1, 4)
+
+        feature_dim = int(inputs.shape[2])
+        groups = [
+            ("landmarks_raw", 0, min(225, feature_dim)),
+            ("velocity", min(225, feature_dim), min(450, feature_dim)),
+            ("inter_hand_distances", min(450, feature_dim), min(455, feature_dim)),
+            ("joint_angles", min(455, feature_dim), min(459, feature_dim)),
+            ("hand_shape", min(459, feature_dim), min(ENRICHED_FEATURE_DIM, feature_dim)),
+        ]
+
+        entries: list[dict[str, object]] = []
+        for group_name, start, end in groups:
+            if end <= start:
+                continue
+            ablated = inputs.copy()
+            ablated[:, :, start:end] = 0.0
+            probs = _predict_probs(ablated)
+            pred = TrainingService._predict_with_thresholds(
+                probs,
+                class_labels=class_labels,
+                class_thresholds=class_thresholds,
+            )
+            ablated_f1 = float(f1_score(y_true, pred, average="macro", zero_division=0))
+            delta = baseline_f1 - ablated_f1
+            entries.append(
+                {
+                    "group": group_name,
+                    "start": int(start),
+                    "end": int(end),
+                    "f1_macro": round(ablated_f1, 4),
+                    "importance": round(float(max(0.0, delta)), 4),
+                    "delta_f1": round(float(delta), 4),
+                }
+            )
+
+        report["groups"] = sorted(entries, key=lambda item: float(item.get("importance", 0.0)), reverse=True)
+        return report
+
+    @staticmethod
     def _build_eval_report(
         *,
         y_true: np.ndarray,
@@ -860,6 +1460,10 @@ class TrainingService:
         class_labels: list[str],
         target_label: str | None,
         none_label: str = "[NONE]",
+        cv_summary: dict[str, object] | None = None,
+        interpretability: dict[str, object] | None = None,
+        training_diagnostics: dict[str, object] | None = None,
+        calibration_temperature: float | None = None,
     ) -> dict[str, object]:
         """Build complete validation report with calibration and class-wise diagnostics."""
         eval_metrics = TrainingService._compute_eval_metrics(
@@ -869,14 +1473,69 @@ class TrainingService:
             target_label=target_label,
             none_label=none_label,
         )
-        ece = TrainingService._compute_ece(probs=probs, y_true=y_true)
-        per_class_metrics = TrainingService._compute_per_class_metrics(
+        aggregate = TrainingService._compute_aggregate_prf_metrics(
             y_true=y_true,
             y_pred=y_pred,
             class_labels=class_labels,
         )
+        auc_metrics = TrainingService._safe_multiclass_auc_metrics(probs=probs, y_true=y_true)
+        ece = TrainingService._compute_ece(probs=probs, y_true=y_true)
+        brier_score = TrainingService._compute_brier_score(probs=probs, y_true=y_true)
+        per_class_metrics, per_class_unavailable = TrainingService._compute_per_class_metrics(
+            y_true=y_true,
+            y_pred=y_pred,
+            class_labels=class_labels,
+        )
+        full_confusion = TrainingService._compute_full_confusion_matrix(
+            y_true=y_true,
+            y_pred=y_pred,
+            class_labels=class_labels,
+        )
+
+        unavailable_reasons: dict[str, str] = {}
+        unavailable_reasons.update(
+            {
+                str(key): str(value)
+                for key, value in (aggregate.get("unavailable_reasons") or {}).items()
+            }
+        )
+        unavailable_reasons.update(
+            {
+                str(key): str(value)
+                for key, value in (auc_metrics.get("unavailable_reasons") or {}).items()
+            }
+        )
+        if ece is None:
+            unavailable_reasons["ece"] = "missing_probabilities_or_labels"
+        if brier_score is None:
+            unavailable_reasons["brier_score"] = "missing_probabilities_or_labels_or_single_class"
+        if per_class_unavailable:
+            unavailable_reasons["per_class_metrics"] = str(per_class_unavailable)
+        if full_confusion.get("unavailable_reason"):
+            unavailable_reasons["confusion_matrix_full"] = str(full_confusion["unavailable_reason"])
+
+        macro_f1_compat = float(eval_metrics.get("macro_f1") or 0.0)
+
         return {
-            "macro_f1": round(float(eval_metrics.get("macro_f1") or 0.0), 4),
+            "macro_f1": round(float(macro_f1_compat), 4),
+            "precision_macro": round(float(aggregate["precision_macro"]), 4)
+            if aggregate.get("precision_macro") is not None
+            else None,
+            "recall_macro": round(float(aggregate["recall_macro"]), 4)
+            if aggregate.get("recall_macro") is not None
+            else None,
+            "f1_macro": round(float(aggregate["f1_macro"]), 4)
+            if aggregate.get("f1_macro") is not None
+            else None,
+            "precision_weighted": round(float(aggregate["precision_weighted"]), 4)
+            if aggregate.get("precision_weighted") is not None
+            else None,
+            "recall_weighted": round(float(aggregate["recall_weighted"]), 4)
+            if aggregate.get("recall_weighted") is not None
+            else None,
+            "f1_weighted": round(float(aggregate["f1_weighted"]), 4)
+            if aggregate.get("f1_weighted") is not None
+            else None,
             "target_sign_f1": (
                 round(float(eval_metrics["target_sign_f1"]), 4)
                 if eval_metrics.get("target_sign_f1") is not None
@@ -887,18 +1546,48 @@ class TrainingService:
                 if eval_metrics.get("open_set_fpr") is not None
                 else None
             ),
+            "roc_auc_ovr_macro": (
+                round(float(auc_metrics["roc_auc_ovr_macro"]), 4)
+                if auc_metrics.get("roc_auc_ovr_macro") is not None
+                else None
+            ),
+            "pr_auc_macro": (
+                round(float(auc_metrics["pr_auc_macro"]), 4)
+                if auc_metrics.get("pr_auc_macro") is not None
+                else None
+            ),
             "ece": round(float(ece), 4) if ece is not None else None,
+            "brier_score": round(float(brier_score), 4) if brier_score is not None else None,
+            "calibration": {
+                "temperature": round(float(calibration_temperature), 4)
+                if calibration_temperature is not None
+                else None,
+                "ece": round(float(ece), 4) if ece is not None else None,
+                "brier_score": round(float(brier_score), 4) if brier_score is not None else None,
+            },
             "confusion_matrix": TrainingService._compute_compact_confusion_matrix(
                 y_true=y_true,
                 y_pred=y_pred,
                 class_labels=class_labels,
                 max_classes=TrainingService._CONFUSION_MAX_CLASSES,
             ),
+            "confusion_matrix_full": full_confusion,
             "per_class_metrics": per_class_metrics,
             "weakest_classes": TrainingService._extract_weakest_classes(
                 per_class_metrics,
                 top_k=TrainingService._WEAKEST_CLASSES_TOP_K,
             ),
+            "cv_summary": cv_summary or {
+                "mode": "unavailable",
+                "unavailable_reason": "not_computed",
+            },
+            "interpretability": interpretability or {
+                "method": "ablation_feature_groups",
+                "groups": [],
+                "unavailable_reason": "not_computed",
+            },
+            "training_diagnostics": training_diagnostics or {},
+            "metric_unavailable_reasons": unavailable_reasons,
         }
 
     @staticmethod
@@ -907,14 +1596,113 @@ class TrainingService:
         class_thresholds: dict[str, float],
         calibration_temperature: float,
         eval_report: dict[str, object],
+        threshold_config: dict[str, object] | None = None,
+        calibration_details: dict[str, object] | None = None,
+        training_diagnostics: dict[str, object] | None = None,
     ) -> dict[str, object]:
         """Build artifact metadata persisted with model checkpoints and DB versions."""
+        calibration_payload = {
+            "method": "temperature_scaling",
+            "temperature": float(calibration_temperature),
+        }
+        if calibration_details:
+            calibration_payload.update(calibration_details)
+
         return {
             "class_thresholds": class_thresholds,
-            "calibration": {"temperature": calibration_temperature},
+            "thresholding": threshold_config or {},
+            "calibration": calibration_payload,
             "calibration_temperature": calibration_temperature,
+            "training_diagnostics": training_diagnostics or {},
             "eval_report": eval_report,
         }
+
+    @staticmethod
+    def _compute_training_diagnostics(
+        *,
+        metrics_history: list[TrainingMetrics],
+    ) -> dict[str, object]:
+        """Compute simple over/underfitting diagnostics from train-vs-val trajectory."""
+        if not metrics_history:
+            return {
+                "status": "unavailable",
+                "unavailable_reason": "empty_metrics_history",
+            }
+
+        last = metrics_history[-1]
+        train_acc = float(last.train_accuracy)
+        val_acc = float(last.val_accuracy)
+        gap = train_acc - val_acc
+
+        trend_window = metrics_history[-min(5, len(metrics_history)):]
+        val_trend = float(np.mean([item.val_accuracy for item in trend_window])) if trend_window else val_acc
+        underfit = train_acc < 0.55 and val_acc < 0.50
+        overfit = gap > 0.15
+        mild_divergence = gap > 0.08 and val_acc < val_trend + 1e-6
+
+        return {
+            "status": "ok",
+            "final_train_accuracy": round(train_acc, 4),
+            "final_val_accuracy": round(val_acc, 4),
+            "train_val_gap": round(gap, 4),
+            "overfit_detected": bool(overfit),
+            "underfit_detected": bool(underfit),
+            "divergence_detected": bool(overfit or mild_divergence),
+            "severity": (
+                "high"
+                if overfit
+                else "medium"
+                if mild_divergence
+                else "low"
+            ),
+        }
+
+    @staticmethod
+    def _adjust_few_shot_regularization(
+        *,
+        config: dict,
+        target_class_samples: int,
+    ) -> dict[str, object]:
+        """Reduce potentially excessive regularization for few-shot runs."""
+        adjustments: dict[str, object] = {
+            "applied": False,
+            "changes": {},
+        }
+        target_samples = max(0, int(target_class_samples))
+        if target_samples > 24:
+            return adjustments
+
+        # Lightweight safeguards only; keep defaults when already conservative.
+        original_weight_decay = float(config.get("weight_decay", 0.05))
+        original_label_smoothing = float(config.get("label_smoothing", 0.1))
+        original_temporal_mask_prob = float(config.get("temporal_mask_prob", 0.15))
+
+        tuned_weight_decay = min(original_weight_decay, 0.02 if target_samples >= 10 else 0.01)
+        tuned_label_smoothing = min(original_label_smoothing, 0.06 if target_samples >= 10 else 0.03)
+        tuned_temporal_mask_prob = min(original_temporal_mask_prob, 0.10 if target_samples >= 10 else 0.06)
+
+        if tuned_weight_decay < original_weight_decay:
+            config["weight_decay"] = tuned_weight_decay
+            adjustments["changes"]["weight_decay"] = {
+                "from": round(original_weight_decay, 6),
+                "to": round(tuned_weight_decay, 6),
+            }
+        if tuned_label_smoothing < original_label_smoothing:
+            config["label_smoothing"] = tuned_label_smoothing
+            adjustments["changes"]["label_smoothing"] = {
+                "from": round(original_label_smoothing, 6),
+                "to": round(tuned_label_smoothing, 6),
+            }
+        if tuned_temporal_mask_prob < original_temporal_mask_prob:
+            config["temporal_mask_prob"] = tuned_temporal_mask_prob
+            adjustments["changes"]["temporal_mask_prob"] = {
+                "from": round(original_temporal_mask_prob, 6),
+                "to": round(tuned_temporal_mask_prob, 6),
+            }
+
+        adjustments["applied"] = bool(adjustments["changes"])
+        adjustments["target_class_samples"] = int(target_samples)
+        return adjustments
 
     @staticmethod
     def _estimate_latency_p95_ms(
@@ -1444,8 +2232,17 @@ class TrainingService:
                 device = self._resolve_device()
 
                 # Create model
-                from app.ml.feature_engineering import ENRICHED_FEATURE_DIM
                 num_features = ENRICHED_FEATURE_DIM
+
+                regularization_adjustments: dict[str, object] = {
+                    "applied": False,
+                    "changes": {},
+                }
+                if mode == "few-shot":
+                    regularization_adjustments = self._adjust_few_shot_regularization(
+                        config=config,
+                        target_class_samples=target_count,
+                    )
 
                 if mode == "few-shot":
                     active_checkpoint = (
@@ -1470,18 +2267,24 @@ class TrainingService:
                     )
 
                 # Training configuration
-                use_class_weights = bool(config.get("use_class_weights", mode != "few-shot"))
-                use_weighted_sampler = bool(config.get("use_weighted_sampler", mode == "few-shot"))
-                use_focal_loss = bool(config.get("use_focal_loss", mode == "few-shot"))
                 if mode == "few-shot":
-                    # Avoid stacking class weights with sampler+focal simultaneously.
-                    use_class_weights = False
-                    use_weighted_sampler = True
-                    use_focal_loss = True
+                    default_use_class_weights = False
+                    default_use_weighted_sampler = True
+                    default_use_focal_loss = True
                 else:
-                    use_class_weights = True
-                    use_weighted_sampler = False
-                    use_focal_loss = False
+                    default_use_class_weights = True
+                    default_use_weighted_sampler = False
+                    default_use_focal_loss = False
+
+                use_class_weights = bool(config.get("use_class_weights", default_use_class_weights))
+                use_weighted_sampler = bool(
+                    config.get("use_weighted_sampler", default_use_weighted_sampler)
+                )
+                use_focal_loss = bool(config.get("use_focal_loss", default_use_focal_loss))
+                if mode == "few-shot":
+                    # Avoid fully stacking all imbalance corrections in tiny-data few-shot.
+                    if use_class_weights and use_weighted_sampler and use_focal_loss:
+                        use_class_weights = False
 
                 teacher_model: SignTransformer | None = None
                 use_distillation = bool(config.get("use_distillation", False))
@@ -1544,6 +2347,12 @@ class TrainingService:
                     use_distillation=use_distillation,
                     distillation_alpha=float(config.get("distillation_alpha", 0.25)),
                     distillation_temperature=float(config.get("distillation_temperature", 2.0)),
+                    class_weight_power=float(config.get("class_weight_power", 0.5)),
+                    class_weight_min=float(config.get("class_weight_min", 0.35)),
+                    class_weight_max=float(config.get("class_weight_max", 4.0)),
+                    weighted_sampler_power=float(config.get("weighted_sampler_power", 0.75)),
+                    weighted_sampler_min=float(config.get("weighted_sampler_min", 0.25)),
+                    weighted_sampler_max=float(config.get("weighted_sampler_max", 5.0)),
                 )
 
                 # Progress callback
@@ -1608,6 +2417,14 @@ class TrainingService:
                     final_val_acc=metrics_history[-1].val_accuracy if metrics_history else 0.0,
                 )
 
+                training_diagnostics = self._compute_training_diagnostics(metrics_history=metrics_history)
+                training_diagnostics["regularization_adjustments"] = regularization_adjustments
+                training_diagnostics["imbalance_strategy"] = {
+                    "use_class_weights": bool(use_class_weights),
+                    "use_weighted_sampler": bool(use_weighted_sampler),
+                    "use_focal_loss": bool(use_focal_loss),
+                }
+
             except Exception as e:
                 logger.error("training_failed", error=str(e), exc_info=True)
                 self._mark_failed_session(db, session, f"Training failed: {str(e)}")
@@ -1657,12 +2474,76 @@ class TrainingService:
                     else 1.0
                 )
                 probs = self._apply_temperature(logits, calibration_temperature)
-                class_thresholds = self._learn_class_thresholds(probs, eval_labels, class_labels)
+                threshold_objective = str(config.get("threshold_objective", "fbeta"))
+                threshold_beta = float(config.get("threshold_beta", 1.5 if mode == "few-shot" else 1.0))
+                threshold_fp_cost = float(config.get("threshold_fp_cost", 1.0))
+                threshold_fn_cost = float(
+                    config.get("threshold_fn_cost", 1.5 if mode == "few-shot" else 1.0)
+                )
+                class_thresholds = self._learn_class_thresholds(
+                    probs,
+                    eval_labels,
+                    class_labels,
+                    objective=threshold_objective,
+                    beta=threshold_beta,
+                    fp_cost=threshold_fp_cost,
+                    fn_cost=threshold_fn_cost,
+                )
                 decoded = self._predict_with_thresholds(
                     probs,
                     class_labels=class_labels,
                     class_thresholds=class_thresholds,
                 )
+
+                cv_enabled = bool(config.get("cv_enabled", True))
+                cv_summary = (
+                    self._compute_cv_summary(
+                        probs=probs,
+                        y_true=eval_labels,
+                        class_labels=class_labels,
+                        k_folds=int(config.get("cv_k_folds", 5)),
+                        threshold_objective=threshold_objective,
+                        threshold_beta=threshold_beta,
+                        threshold_fp_cost=threshold_fp_cost,
+                        threshold_fn_cost=threshold_fn_cost,
+                    )
+                    if cv_enabled
+                    else {
+                        "mode": "disabled",
+                        "unavailable_reason": "disabled_by_config",
+                    }
+                )
+
+                interpretability_enabled = bool(config.get("interpretability_enabled", True))
+                interpretability_report = (
+                    self._compute_feature_group_interpretability(
+                        model=model,
+                        dataset=val_dataset,
+                        device=device,
+                        class_labels=class_labels,
+                        calibration_temperature=calibration_temperature,
+                        class_thresholds=class_thresholds,
+                        max_samples=int(config.get("interpretability_max_samples", 64)),
+                    )
+                    if interpretability_enabled
+                    else {
+                        "method": "ablation_feature_groups",
+                        "groups": [],
+                        "unavailable_reason": "disabled_by_config",
+                    }
+                )
+
+                training_diagnostics["threshold_tuning"] = {
+                    "objective": threshold_objective,
+                    "beta": round(float(threshold_beta), 4),
+                    "fp_cost": round(float(threshold_fp_cost), 4),
+                    "fn_cost": round(float(threshold_fn_cost), 4),
+                }
+                training_diagnostics["calibration"] = {
+                    "enabled": bool(calibration_enabled),
+                    "method": "temperature_scaling",
+                    "temperature": round(float(calibration_temperature), 4),
+                }
 
                 target_sign_slug = slug_by_id.get(sign_id) if sign_id else None
                 model_eval_report = self._build_eval_report(
@@ -1671,6 +2552,10 @@ class TrainingService:
                     probs=probs,
                     class_labels=class_labels,
                     target_label=target_sign_slug,
+                    cv_summary=cv_summary,
+                    interpretability=interpretability_report,
+                    training_diagnostics=training_diagnostics,
+                    calibration_temperature=calibration_temperature,
                 )
                 macro_f1 = float(model_eval_report.get("macro_f1") or 0.0)
                 target_sign_f1 = (
@@ -1709,6 +2594,17 @@ class TrainingService:
                     class_thresholds=class_thresholds,
                     calibration_temperature=calibration_temperature,
                     eval_report=model_eval_report,
+                    threshold_config={
+                        "objective": threshold_objective,
+                        "beta": threshold_beta,
+                        "fp_cost": threshold_fp_cost,
+                        "fn_cost": threshold_fn_cost,
+                    },
+                    calibration_details={
+                        "enabled": bool(calibration_enabled),
+                        "method": "temperature_scaling",
+                    },
+                    training_diagnostics=training_diagnostics,
                 )
                 trainer.save_model(
                     model_file,

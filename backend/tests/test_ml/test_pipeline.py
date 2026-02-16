@@ -121,21 +121,23 @@ def test_pipeline_prediction_filters_reject_below_threshold() -> None:
     """Post-processing should reject predictions that do not meet adaptive threshold."""
     pipeline = SignFlowInferencePipeline()
 
-    label, confidence = pipeline._apply_prediction_filters(
+    label, confidence, trace = pipeline._apply_prediction_filters(
         prediction="bonjour",
         confidence=0.66,
         threshold=0.7,
     )
     assert label == "NONE"
     assert confidence == 0.0
+    assert trace["status"] == "rejected"
 
-    accepted_label, accepted_confidence = pipeline._apply_prediction_filters(
+    accepted_label, accepted_confidence, accepted_trace = pipeline._apply_prediction_filters(
         prediction="bonjour",
         confidence=0.82,
         threshold=0.7,
     )
     assert accepted_label == "bonjour"
     assert accepted_confidence >= 0.82
+    assert accepted_trace["status"] == "accepted"
 
 
 def test_pipeline_builds_multiple_inference_views() -> None:
@@ -184,3 +186,20 @@ def test_pipeline_set_labels_keeps_none_class() -> None:
     pipeline.model = None
     pipeline.set_labels(["[NONE]", "lsfb_bonjour"])
     assert pipeline.labels[0] == "[NONE]"
+
+
+def test_pipeline_exposes_decision_diagnostics() -> None:
+    """Inference result should expose serialized decision diagnostics for audits."""
+    pipeline = SignFlowInferencePipeline(seq_len=1)
+    output = pipeline._idle_prediction()
+    assert output.decision_diagnostics is None
+
+    _label, _confidence, _trace = pipeline._apply_prediction_filters(
+        prediction="bonjour",
+        confidence=0.5,
+        threshold=0.7,
+    )
+    diagnostics = pipeline.snapshot_decision_diagnostics()
+    counters = diagnostics["counters"]
+    assert counters["rejected_total"] >= 1
+    assert diagnostics["last_decision_trace"]["status"] == "rejected"

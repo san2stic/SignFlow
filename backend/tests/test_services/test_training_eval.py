@@ -127,9 +127,18 @@ def test_eval_report_contains_new_quality_fields() -> None:
     )
 
     assert "ece" in report
+    assert "brier_score" in report
+    assert "precision_macro" in report
+    assert "recall_macro" in report
+    assert "f1_weighted" in report
+    assert "roc_auc_ovr_macro" in report
+    assert "pr_auc_macro" in report
     assert "confusion_matrix" in report
+    assert "confusion_matrix_full" in report
     assert "per_class_metrics" in report
     assert "weakest_classes" in report
+    assert "cv_summary" in report
+    assert "interpretability" in report
     confusion = report["confusion_matrix"]
     assert isinstance(confusion, dict)
     assert confusion["labels"] == ["[NONE]", "lsfb_bonjour"]
@@ -138,6 +147,105 @@ def test_eval_report_contains_new_quality_fields() -> None:
     per_class = report["per_class_metrics"]
     assert isinstance(per_class, list)
     assert len(per_class) == 2
+    full_confusion = report["confusion_matrix_full"]
+    assert full_confusion["labels"] == ["[NONE]", "lsfb_bonjour"]
+    assert full_confusion["matrix"] == [[2, 0], [1, 2]]
+    assert full_confusion["normalized"] == [[1.0, 0.0], [0.3333, 0.6667]]
+
+
+def test_eval_report_single_class_marks_unavailable_metrics() -> None:
+    """Single-class eval should set unsupported metrics to None with explicit reasons."""
+    y_true = np.array([0, 0, 0], dtype=np.int64)
+    y_pred = np.array([0, 0, 0], dtype=np.int64)
+    probs = np.array([[1.0], [1.0], [1.0]], dtype=np.float32)
+
+    report = TrainingService._build_eval_report(
+        y_true=y_true,
+        y_pred=y_pred,
+        probs=probs,
+        class_labels=["only_class"],
+        target_label="only_class",
+    )
+
+    assert report["roc_auc_ovr_macro"] is None
+    assert report["pr_auc_macro"] is None
+    assert report["brier_score"] is None
+    assert report["metric_unavailable_reasons"]["roc_auc_ovr_macro"] == "requires_at_least_two_classes"
+    assert report["metric_unavailable_reasons"]["pr_auc_macro"] == "requires_at_least_two_classes"
+
+
+def test_threshold_learning_honors_cost_objective() -> None:
+    """Cost-driven thresholding should bias toward low-FP decisions."""
+    probs = np.array(
+        [
+            [0.95, 0.05],
+            [0.82, 0.18],
+            [0.65, 0.35],
+            [0.45, 0.55],
+            [0.25, 0.75],
+        ],
+        dtype=np.float32,
+    )
+    labels = np.array([0, 0, 0, 1, 1], dtype=np.int64)
+
+    thresholds_fbeta = TrainingService._learn_class_thresholds(
+        probs,
+        labels,
+        ["a", "b"],
+        objective="fbeta",
+        beta=2.0,
+    )
+    thresholds_cost = TrainingService._learn_class_thresholds(
+        probs,
+        labels,
+        ["a", "b"],
+        objective="cost",
+        fp_cost=4.0,
+        fn_cost=1.0,
+    )
+
+    assert thresholds_cost["b"] >= thresholds_fbeta["b"]
+
+
+def test_cv_summary_fallback_when_stratification_is_insufficient() -> None:
+    """CV helper should fallback to holdout when class supports are too small for k-fold."""
+    probs = np.array(
+        [
+            [0.9, 0.1],
+            [0.8, 0.2],
+            [0.2, 0.8],
+        ],
+        dtype=np.float32,
+    )
+    y_true = np.array([0, 0, 1], dtype=np.int64)
+
+    cv = TrainingService._compute_cv_summary(
+        probs=probs,
+        y_true=y_true,
+        class_labels=["a", "b"],
+        k_folds=5,
+    )
+
+    assert cv["mode"] == "holdout_fallback"
+    assert cv["k_folds_used"] == 1
+    assert cv["f1_macro_mean"] is not None
+    assert len(cv["folds"]) == 1
+
+
+def test_cv_summary_marks_unavailable_on_single_class() -> None:
+    """CV helper should expose explicit unavailable reason on single-class labels."""
+    probs = np.array([[1.0], [1.0], [1.0]], dtype=np.float32)
+    y_true = np.array([0, 0, 0], dtype=np.int64)
+
+    cv = TrainingService._compute_cv_summary(
+        probs=probs,
+        y_true=y_true,
+        class_labels=["only"],
+        k_folds=3,
+    )
+
+    assert cv["mode"] == "unavailable"
+    assert cv["unavailable_reason"] == "single_class_ground_truth"
 
 
 def test_deployment_gate_rejects_high_ece() -> None:

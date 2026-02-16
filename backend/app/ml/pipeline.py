@@ -35,6 +35,7 @@ class Prediction:
     alternatives: list[dict[str, float]]
     sentence_buffer: str
     is_sentence_complete: bool
+    decision_diagnostics: dict[str, object] | None = None
 
 
 class SignFlowInferencePipeline:
@@ -112,6 +113,23 @@ class SignFlowInferencePipeline:
         self.labels: list[str] = []
         self.sentence_tokens: list[str] = []
         self._current_motion_energy = 0.0
+        self._decision_counters: dict[str, int] = {
+            "total_inferences": 0,
+            "accepted": 0,
+            "rejected_total": 0,
+            "rejected_by_confidence_threshold": 0,
+            "rejected_by_adaptive_threshold": 0,
+            "rejected_by_class_threshold": 0,
+            "rejected_by_label_none": 0,
+            "rejected_by_calibration": 0,
+            "rejected_by_margin": 0,
+            "rejected_by_motion": 0,
+            "rejected_by_tta_disagreement": 0,
+        }
+        self._last_decision_trace: dict[str, object] = {
+            "status": "idle",
+            "reason": "not_started",
+        }
 
         # State machine attributes
         self.max_buffer_frames = max_buffer_frames
@@ -330,11 +348,21 @@ class SignFlowInferencePipeline:
         predicted_label, predicted_confidence, alternatives = self._infer_window(enriched)
         adaptive_threshold = self._adaptive_threshold()
         label_threshold = self._threshold_for_label(predicted_label)
-        predicted_label, predicted_confidence = self._apply_prediction_filters(
+        effective_threshold = max(adaptive_threshold, label_threshold)
+        predicted_label, predicted_confidence, filter_trace = self._apply_prediction_filters(
             prediction=predicted_label,
             confidence=predicted_confidence,
-            threshold=max(adaptive_threshold, label_threshold),
+            threshold=effective_threshold,
         )
+
+        decision_trace = {
+            "prediction_before_filters": self._last_decision_trace,
+            "adaptive_threshold": round(float(adaptive_threshold), 4),
+            "class_threshold": round(float(label_threshold), 4),
+            "effective_threshold": round(float(effective_threshold), 4),
+            "filter_trace": filter_trace,
+            "counters": dict(self._decision_counters),
+        }
 
         # Reset for next sign
         self.frame_buffer.clear()
@@ -353,6 +381,7 @@ class SignFlowInferencePipeline:
             alternatives=alternatives,
             sentence_buffer=sentence,
             is_sentence_complete=False,
+            decision_diagnostics=decision_trace,
         )
 
     def reset(self) -> None:
@@ -367,6 +396,21 @@ class SignFlowInferencePipeline:
         self._rest_frame_count = 0
         self._recording_frame_count = 0
         self._latest_frontend_confidence = 1.0
+        for key in list(self._decision_counters.keys()):
+            self._decision_counters[key] = 0
+        self._last_decision_trace = {
+            "status": "idle",
+            "reason": "reset",
+        }
+
+    def snapshot_decision_diagnostics(self) -> dict[str, object]:
+        """Expose serializable decision diagnostics for audit and tests."""
+        return {
+            "counters": dict(self._decision_counters),
+            "last_decision_trace": dict(self._last_decision_trace),
+            "state": self.state.value,
+            "buffer_frames": int(len(self.frame_buffer)),
+        }
 
     def _infer_window(self, window: np.ndarray) -> tuple[str, float, list[dict[str, float]]]:
         """
@@ -384,6 +428,7 @@ class SignFlowInferencePipeline:
 
         try:
             probs, view_disagreement = self._infer_probabilities(window)
+            self._decision_counters["total_inferences"] += 1
 
             # Get top predictions
             top_k = min(4, len(probs))  # Get top 4 predictions
@@ -434,10 +479,41 @@ class SignFlowInferencePipeline:
 
             # If confidence margin is too low, treat prediction as NONE.
             if calibrated_confidence <= 0.0:
+                self._decision_counters["rejected_by_calibration"] += 1
+                self._decision_counters["rejected_total"] += 1
+                self._last_decision_trace = {
+                    "status": "rejected",
+                    "stage": "calibration",
+                    "reason": "calibrated_confidence_non_positive",
+                    "raw_confidence": round(raw_confidence, 4),
+                    "calibrated_confidence": round(calibrated_confidence, 4),
+                    "view_disagreement": round(float(view_disagreement), 6),
+                }
                 return "NONE", 0.0, alternatives
 
             if prediction in {"NONE", "[NONE]"}:
+                self._decision_counters["rejected_by_label_none"] += 1
+                self._decision_counters["rejected_total"] += 1
+                self._last_decision_trace = {
+                    "status": "rejected",
+                    "stage": "labeling",
+                    "reason": "model_predicted_none_class",
+                    "calibrated_confidence": round(calibrated_confidence, 4),
+                }
                 return "NONE", round(calibrated_confidence, 3), alternatives
+
+            self._last_decision_trace = {
+                "status": "candidate",
+                "stage": "post_inference",
+                "prediction": prediction,
+                "raw_confidence": round(raw_confidence, 4),
+                "calibrated_confidence": round(calibrated_confidence, 4),
+                "view_disagreement": round(float(view_disagreement), 6),
+                "top2_margin": round(
+                    float(raw_confidence - (float(probs[top_indices[1]]) if len(top_indices) > 1 else 0.0)),
+                    4,
+                ),
+            }
 
             return prediction, round(calibrated_confidence, 3), alternatives
 
@@ -595,10 +671,20 @@ class SignFlowInferencePipeline:
         prediction: str,
         confidence: float,
         threshold: float,
-    ) -> tuple[str, float]:
+    ) -> tuple[str, float, dict[str, object]]:
         """Filter raw predictions with temporal consensus + adaptive threshold."""
         if prediction == "NONE" or confidence <= 0.0:
-            return "NONE", 0.0
+            self._decision_counters["rejected_by_calibration"] += 1
+            self._decision_counters["rejected_total"] += 1
+            trace = {
+                "status": "rejected",
+                "stage": "filters",
+                "reason": "prediction_none_or_non_positive_confidence",
+                "confidence": round(float(confidence), 4),
+                "threshold": round(float(threshold), 4),
+            }
+            self._last_decision_trace = trace
+            return "NONE", 0.0, trace
 
         if self.prediction_history and self.prediction_history[-1][0] != prediction:
             self.prediction_history.clear()
@@ -611,9 +697,38 @@ class SignFlowInferencePipeline:
             confidence = max(confidence, smoothed_confidence)
 
         if confidence < threshold:
-            return "NONE", 0.0
+            self._decision_counters["rejected_by_confidence_threshold"] += 1
+            self._decision_counters["rejected_total"] += 1
+            if threshold > self.confidence_threshold:
+                self._decision_counters["rejected_by_adaptive_threshold"] += 1
+            class_threshold = self._threshold_for_label(prediction)
+            if class_threshold > 0 and threshold >= class_threshold:
+                self._decision_counters["rejected_by_class_threshold"] += 1
+            trace = {
+                "status": "rejected",
+                "stage": "filters",
+                "reason": "below_effective_threshold",
+                "prediction": prediction,
+                "confidence": round(float(confidence), 4),
+                "smoothed_confidence": round(float(smoothed_confidence), 4),
+                "threshold": round(float(threshold), 4),
+            }
+            self._last_decision_trace = trace
+            return "NONE", 0.0, trace
 
-        return prediction, round(confidence, 3)
+        self._decision_counters["accepted"] += 1
+        trace = {
+            "status": "accepted",
+            "stage": "filters",
+            "prediction": prediction,
+            "confidence": round(float(confidence), 4),
+            "threshold": round(float(threshold), 4),
+            "smoothed_label": smoothed_label,
+            "smoothed_confidence": round(float(smoothed_confidence), 4),
+        }
+        self._last_decision_trace = trace
+
+        return prediction, round(confidence, 3), trace
 
     def _trim_recording_window(self, window: np.ndarray, trailing_rest: int) -> np.ndarray:
         """Trim pre/post idle frames before resampling."""
@@ -688,14 +803,17 @@ class SignFlowInferencePipeline:
             + (0.08 * motion_factor)
         )
         if margin < self.min_prediction_margin:
+            self._decision_counters["rejected_by_margin"] += 1
             calibrated *= margin / self.min_prediction_margin
         if self._current_motion_energy < self.min_motion_energy:
+            self._decision_counters["rejected_by_motion"] += 1
             calibrated *= 0.85
 
         if self.inference_num_views > 1:
             disagreement_ratio = np.clip(disagreement / self.max_view_disagreement, 0.0, 1.0)
             calibrated *= 1.0 - (0.35 * disagreement_ratio)
             if disagreement > self.max_view_disagreement:
+                self._decision_counters["rejected_by_tta_disagreement"] += 1
                 calibrated *= 0.8
 
         return float(np.clip(calibrated, 0.0, 1.0))

@@ -46,6 +46,9 @@ def test_build_artifact_metadata_contains_eval_report_quality_fields() -> None:
         class_thresholds={"[NONE]": 0.7, "lsfb_bonjour": 0.82},
         calibration_temperature=1.07,
         eval_report=eval_report,
+        threshold_config={"objective": "fbeta", "beta": 1.5, "fp_cost": 1.0, "fn_cost": 1.5},
+        calibration_details={"enabled": True, "method": "temperature_scaling"},
+        training_diagnostics={"divergence_detected": False},
     )
 
     assert "class_thresholds" in metadata
@@ -55,3 +58,6 @@ def test_build_artifact_metadata_contains_eval_report_quality_fields() -> None:
     assert "confusion_matrix" in metadata["eval_report"]
     assert "per_class_metrics" in metadata["eval_report"]
     assert "weakest_classes" in metadata["eval_report"]
+    assert metadata["calibration"]["method"] == "temperature_scaling"
+    assert metadata["thresholding"]["objective"] == "fbeta"
+    assert metadata["training_diagnostics"]["divergence_detected"] is False
