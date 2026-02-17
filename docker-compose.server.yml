@@ -35,30 +35,18 @@ services:
       - "127.0.0.1:9000:9000"   # API S3
       - "127.0.0.1:9001:9001"   # Console admin MinIO (accès SSH tunnel recommandé)
     volumes:
-      # ──────────────────────────────────────────────────────────────────────
-      # Bind mounts générés par setup-storage.sh
-      # Décommenter les lignes correspondant à votre MINIO_DISK_COUNT
-      #
-      # 1 disque (MINIO_DISK_COUNT=1) :
+      # Bind mounts auto-configurés par setup-storage.sh (5 disques, erasure-coding)
       - /mnt/disk1/minio-data:/mnt/disk1/minio-data
-      #
-      # 2 disques (MINIO_DISK_COUNT=2) — décommenter :
-      # - /mnt/disk2/minio-data:/mnt/disk2/minio-data
-      #
-      # 3 disques (MINIO_DISK_COUNT=3) — décommenter :
-      # - /mnt/disk3/minio-data:/mnt/disk3/minio-data
-      #
-      # 4 disques (MINIO_DISK_COUNT=4, erasure coding) — décommenter :
-      # - /mnt/disk4/minio-data:/mnt/disk4/minio-data
-      #
-      # 5+ disques — continuer le pattern...
-      # ──────────────────────────────────────────────────────────────────────
+      - /mnt/disk2/minio-data:/mnt/disk2/minio-data
+      - /mnt/disk3/minio-data:/mnt/disk3/minio-data
+      - /mnt/disk4/minio-data:/mnt/disk4/minio-data
+      - /mnt/disk5/minio-data:/mnt/disk5/minio-data
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
-      interval: 30s
+      interval: 15s
       timeout: 10s
-      retries: 5
-      start_period: 30s
+      retries: 10
+      start_period: 90s
     networks:
       - signflow_network
 
