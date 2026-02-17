@@ -47,7 +47,7 @@ export function TranslatePage(): JSX.Element {
   const { videoRef, attachVideoRef, isReady: cameraReady, error: cameraError, toggleFacing, capturePreRollClip } = useCamera();
   const { frame, ready } = useMediaPipe({
     videoRef,
-    enabled: cameraReady,
+    enabled: true, // ✅ FIX: Toujours activer MediaPipe (ne pas dépendre de cameraReady)
     targetFps: 30,
     includeFace: false,
     modelComplexity: 2
@@ -172,6 +172,19 @@ export function TranslatePage(): JSX.Element {
 
   useEffect(() => {
     if (!frame || !ws.connected) return;
+
+    // ✅ FIX: Vérifier que la frame contient des landmarks valides avant l'envoi
+    const hasValidLandmarks =
+      (frame.hands.left.length > 0 && frame.hands.left.some(point => point[0] !== 0 || point[1] !== 0 || point[2] !== 0)) ||
+      (frame.hands.right.length > 0 && frame.hands.right.some(point => point[0] !== 0 || point[1] !== 0 || point[2] !== 0)) ||
+      (frame.pose.length > 0 && frame.pose.some(point => point[0] !== 0 || point[1] !== 0 || point[2] !== 0));
+
+    if (!hasValidLandmarks) {
+      // Console log pour débogage (peut être retiré en production)
+      console.debug('[TranslatePage] Frame sans landmarks valides ignorée');
+      return;
+    }
+
     ws.send(serializeLandmarkFrame(frame));
   }, [frame, ws.connected, ws.send]);
 
