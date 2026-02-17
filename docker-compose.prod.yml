@@ -18,6 +18,7 @@ services:
     build:
       context: ./frontend
       dockerfile: Dockerfile.prod
+    command: nginx -g "daemon off;"
     restart: unless-stopped
     networks:
       - signflow_network
