@@ -59,10 +59,15 @@ class MLFlowTracker:
 
         # Set tracking URI
         if tracking_uri is None:
-            # Default to local filesystem in data/models/mlruns
             from app.config import get_settings
             settings = get_settings()
-            tracking_uri = f"file://{settings.model_dir}/mlruns"
+
+            # Use setting from config (can be set via env var MLFLOW_TRACKING_URI)
+            if settings.mlflow_tracking_uri:
+                tracking_uri = settings.mlflow_tracking_uri
+            else:
+                # Default to local filesystem in data/models/mlruns
+                tracking_uri = f"file://{settings.model_dir}/mlruns"
 
         mlflow.set_tracking_uri(tracking_uri)
         logger.info("mlflow_tracking_uri_set", uri=tracking_uri)
@@ -207,7 +212,7 @@ class MLFlowTracker:
         registered_model_name: str | None = None,
     ) -> None:
         """
-        Log a PyTorch model.
+        Log a PyTorch model state_dict and optionally register in Model Registry.
 
         Args:
             model: PyTorch model to log
@@ -218,52 +223,54 @@ class MLFlowTracker:
             return
 
         try:
+            import tempfile
             import torch
 
-            # Save model state dict temporarily
-            temp_path = Path("/tmp/mlflow_model_temp.pt")
-            torch.save(model.state_dict(), temp_path)
+            # Save state_dict to temp file
+            with tempfile.NamedTemporaryFile(suffix=".pt", delete=False) as tmp_file:
+                temp_path = Path(tmp_file.name)
+                torch.save(model.state_dict(), temp_path)
 
-            # Log as artifact
-            mlflow.log_artifact(str(temp_path), artifact_path=artifact_path)
+            try:
+                # Log as artifact
+                mlflow.log_artifact(str(temp_path), artifact_path=artifact_path)
+                logger.info("mlflow_model_logged", artifact_path=artifact_path)
 
-            # Clean up temp file
-            temp_path.unlink(missing_ok=True)
+                # Register in Model Registry if requested
+                if registered_model_name:
+                    client = MlflowClient()
+                    run_id = self._active_run.info.run_id
+                    model_uri = f"runs:/{run_id}/{artifact_path}/{ temp_path.name}"
 
-            logger.info("mlflow_model_logged", artifact_path=artifact_path)
+                    # Create registered model if it doesn't exist
+                    try:
+                        client.create_registered_model(registered_model_name)
+                        logger.info("mlflow_registered_model_created", name=registered_model_name)
+                    except Exception:
+                        # Model already exists, that's fine
+                        pass
 
-            # Register model if requested
-            if registered_model_name:
-                self._register_model(artifact_path, registered_model_name)
+                    # Create model version
+                    model_version = client.create_model_version(
+                        name=registered_model_name,
+                        source=model_uri,
+                        run_id=run_id,
+                    )
+
+                    logger.info(
+                        "mlflow_model_registered",
+                        name=registered_model_name,
+                        version=model_version.version,
+                        run_id=run_id,
+                    )
+
+            finally:
+                # Clean up temp file
+                temp_path.unlink(missing_ok=True)
 
         except Exception as e:
             logger.error("mlflow_log_model_failed", error=str(e))
 
-    def _register_model(self, artifact_path: str, model_name: str) -> None:
-        """Register model in MLflow Model Registry."""
-        if not self.enabled or self._active_run is None:
-            return
-
-        try:
-            client = MlflowClient()
-            run_id = self._active_run.info.run_id
-            model_uri = f"runs:/{run_id}/{artifact_path}"
-
-            # Register model version
-            model_version = client.create_model_version(
-                name=model_name,
-                source=model_uri,
-                run_id=run_id
-            )
-
-            logger.info(
-                "mlflow_model_registered",
-                name=model_name,
-                version=model_version.version,
-                run_id=run_id
-            )
-        except Exception as e:
-            logger.error("mlflow_register_model_failed", error=str(e), name=model_name)
 
     def log_dict(self, dictionary: dict, filename: str) -> None:
         """
@@ -280,7 +287,13 @@ class MLFlowTracker:
             mlflow.log_dict(dictionary, filename)
             logger.debug("mlflow_dict_logged", filename=filename)
         except Exception as e:
-            logger.error("mlflow_log_dict_failed", error=str(e), filename=filename)
+            import traceback
+            logger.error(
+                "mlflow_log_dict_failed",
+                error=str(e),
+                filename=filename,
+                traceback=traceback.format_exc(),
+            )
 
     def set_tags(self, tags: dict[str, str]) -> None:
         """

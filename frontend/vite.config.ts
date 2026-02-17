@@ -10,8 +10,16 @@ export default defineConfig({
     dedupe: ["react", "react-dom"],
     alias: {
       react: path.resolve(__dirname, "node_modules/react"),
-      "react-dom": path.resolve(__dirname, "node_modules/react-dom")
+      "react-dom": path.resolve(__dirname, "node_modules/react-dom"),
+      "@": path.resolve(__dirname, "src")
     }
+  },
+  worker: {
+    format: "es", // ES modules for better tree-shaking
+    plugins: () => [react()],
+  },
+  optimizeDeps: {
+    exclude: ["@mediapipe/holistic"], // Let MediaPipe load from CDN
   },
   server: {
     host: true,

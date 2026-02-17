@@ -1156,9 +1156,13 @@ class SignTrainer:
             # [MLflow Sentinel] Log artifacts: classification report + best model
             if eval_report:
                 mlflow_tracker.log_dict(eval_report, "classification_report.json")
-            # Log best model checkpoint
+            # Log best model checkpoint and register in Model Registry
             if self.best_model_state is not None:
-                mlflow_tracker.log_model(self.model, artifact_path="best_model")
+                mlflow_tracker.log_model(
+                    self.model,
+                    artifact_path="best_model",
+                    registered_model_name="signflow-model"  # Register in Model Registry
+                )
 
         return self.metrics_history
 
