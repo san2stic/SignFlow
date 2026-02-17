@@ -67,6 +67,16 @@ class S3StorageBackend(StorageBackend):
         logger.debug("s3.uploaded_bytes", key=object_key, bucket=bucket, size=len(data))
         return object_key
 
+    def stream_object(self, object_key: str, bucket: str, chunk_size: int = 1024 * 256):
+        """Yield chunks from an S3 object for streaming responses."""
+        resp = self._client.get_object(Bucket=bucket, Key=object_key)
+        body = resp["Body"]
+        while True:
+            chunk = body.read(chunk_size)
+            if not chunk:
+                break
+            yield chunk
+
     def download_bytes(self, object_key: str, bucket: str) -> bytes:
         resp = self._client.get_object(Bucket=bucket, Key=object_key)
         data = resp["Body"].read()

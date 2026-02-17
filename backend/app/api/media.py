@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from fastapi.responses import FileResponse, RedirectResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from sqlalchemy.orm import Session
 
 from app.api.deps import enforce_rate_limit, enforce_write_rate_limit, get_db
@@ -24,15 +24,20 @@ def delete_video(video_id: str, db: Session = Depends(get_db)) -> None:
 
 @router.get("/{video_id}/stream", dependencies=[Depends(enforce_rate_limit)])
 def stream_video(video_id: str, db: Session = Depends(get_db)):
-    """Stream video : redirect vers presigned URL S3 (prod) ou FileResponse local (dev)."""
+    """Stream video : proxy depuis S3 (prod) ou FileResponse local (dev)."""
     settings = get_settings()
 
     if settings.use_s3_storage:
-        url = media_service.get_video_url(db, video_id)
-        if not url:
+        from app.models.video import Video
+        from app.storage.factory import get_storage
+        video = db.get(Video, video_id)
+        if not video:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Video not found")
-        # 307 Temporary Redirect : le client récupère la vidéo directement depuis MinIO
-        return RedirectResponse(url=url, status_code=status.HTTP_307_TEMPORARY_REDIRECT)
+        storage = get_storage()
+        return StreamingResponse(
+            storage.stream_object(video.file_path, settings.s3_bucket_videos),
+            media_type="video/mp4",
+        )
 
     path = media_service.get_video_path(db, video_id)
     if not path:
