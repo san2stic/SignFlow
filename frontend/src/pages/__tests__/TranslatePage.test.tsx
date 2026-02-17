@@ -85,7 +85,7 @@ describe("TranslatePage", () => {
     useTrainingStore.setState({ pendingClip: null });
   });
 
-  it("keeps the last confident word visible for a short hold period", () => {
+  it("keeps the last confident word visible for an extended hold period", () => {
     vi.useFakeTimers();
 
     render(
@@ -120,7 +120,68 @@ describe("TranslatePage", () => {
     expect(within(currentSignPanel).getByText("lsfb_bonjour")).toBeInTheDocument();
 
     act(() => {
-      vi.advanceTimersByTime(1600);
+      vi.advanceTimersByTime(2800);
+      wsMessageHandler?.({
+        prediction: "NONE",
+        confidence: 0,
+        alternatives: [],
+        sentence_buffer: "lsfb_bonjour",
+        is_sentence_complete: false
+      });
+    });
+
+    expect(within(currentSignPanel).getByText("lsfb_bonjour")).toBeInTheDocument();
+
+    act(() => {
+      vi.advanceTimersByTime(300);
+      wsMessageHandler?.({
+        prediction: "NONE",
+        confidence: 0,
+        alternatives: [],
+        sentence_buffer: "lsfb_bonjour",
+        is_sentence_complete: false
+      });
+    });
+
+    expect(within(currentSignPanel).getByText("NONE")).toBeInTheDocument();
+  });
+
+  it("keeps a low-confidence detected word visible briefly to avoid flicker", () => {
+    vi.useFakeTimers();
+
+    render(
+      <MemoryRouter>
+        <TranslatePage />
+      </MemoryRouter>
+    );
+
+    act(() => {
+      wsMessageHandler?.({
+        prediction: "lsfb_bonjour",
+        confidence: 0.35,
+        alternatives: [],
+        sentence_buffer: "lsfb_bonjour",
+        is_sentence_complete: false
+      });
+    });
+
+    const currentSignPanel = screen.getByText("Signe détecté").parentElement as HTMLElement;
+    expect(within(currentSignPanel).getByText("lsfb_bonjour")).toBeInTheDocument();
+
+    act(() => {
+      wsMessageHandler?.({
+        prediction: "NONE",
+        confidence: 0,
+        alternatives: [],
+        sentence_buffer: "lsfb_bonjour",
+        is_sentence_complete: false
+      });
+    });
+
+    expect(within(currentSignPanel).getByText("lsfb_bonjour")).toBeInTheDocument();
+
+    act(() => {
+      vi.advanceTimersByTime(1300);
       wsMessageHandler?.({
         prediction: "NONE",
         confidence: 0,

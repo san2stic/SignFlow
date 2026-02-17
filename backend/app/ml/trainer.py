@@ -22,6 +22,7 @@ from torch.utils.data import DataLoader, Dataset, Subset, WeightedRandomSampler
 from app.ml.curriculum import CurriculumSampler
 from app.ml.distillation import DistillationTrainer
 from app.ml.dataset import LandmarkDataset
+from app.ml.feature_alignment import align_torch_features, resolve_model_feature_dim
 from app.ml.model import SignTransformer
 from app.ml.tracking import MLFlowTracker, create_default_tracker
 from app.ml.gpu_manager import GPUManager, GPUConfig, get_gpu_manager
@@ -277,6 +278,7 @@ class SignTrainer:
         self.best_val_loss = float("inf")
         self.best_model_state: dict[str, torch.Tensor] | None = None
         self.epochs_without_improvement = 0
+        self._optimizer_step_count = 0
         self.metrics_history: list[TrainingMetrics] = []
         self._mlflow_tracker: MLFlowTracker | None = None
         self.mlflow_run_id: str | None = None
@@ -526,7 +528,14 @@ class SignTrainer:
             self.optimizer.step()
 
         self._update_ema()
+        self._optimizer_step_count += 1
         self.optimizer.zero_grad(set_to_none=True)
+
+    @staticmethod
+    def _align_landmarks_for_model(landmarks: torch.Tensor, model: nn.Module) -> torch.Tensor:
+        """Adapt batch feature width to match model.num_features."""
+        target_dim = resolve_model_feature_dim(model)
+        return align_torch_features(landmarks, target_dim)
 
     def _validate_with_model(
         self,
@@ -544,6 +553,7 @@ class SignTrainer:
             for landmarks, labels in dataloader:
                 landmarks = landmarks.to(self.device)
                 labels = labels.to(self.device)
+                landmarks = self._align_landmarks_for_model(landmarks, model)
 
                 with self._autocast_context():
                     logits = model(landmarks)
@@ -574,7 +584,23 @@ class SignTrainer:
             return
 
         try:
-            update_bn(train_loader, self.swa_model, device=self.device)
+            sample_dim = None
+            train_dataset = getattr(train_loader, "dataset", None)
+            if train_dataset is not None and len(train_dataset) > 0:
+                try:
+                    sample_tensor, _sample_label = train_dataset[0]
+                    sample_dim = int(sample_tensor.shape[-1])
+                except Exception:  # noqa: BLE001
+                    sample_dim = None
+            swa_dim = resolve_model_feature_dim(self.swa_model)
+            if sample_dim is not None and swa_dim is not None and sample_dim != swa_dim:
+                logger.info(
+                    "swa_batch_norm_update_skipped_feature_mismatch",
+                    sample_dim=sample_dim,
+                    model_dim=swa_dim,
+                )
+            else:
+                update_bn(train_loader, self.swa_model, device=self.device)
         except Exception as exc:  # noqa: BLE001
             logger.warning("swa_batch_norm_update_failed", error=str(exc))
 
@@ -642,6 +668,7 @@ class SignTrainer:
             landmarks = landmarks.to(self.device)  # [batch, seq_len, features]
             labels = labels.to(self.device)  # [batch]
             landmarks = self._apply_temporal_mask(landmarks)
+            landmarks = self._align_landmarks_for_model(landmarks, self.model)
 
             # Forward pass
             with self._autocast_context():
@@ -665,7 +692,11 @@ class SignTrainer:
 
                 if self.config.use_distillation and self.teacher_model is not None:
                     with torch.no_grad():
-                        teacher_logits = self.teacher_model(distillation_inputs)
+                        teacher_inputs = self._align_landmarks_for_model(
+                            distillation_inputs,
+                            self.teacher_model,
+                        )
+                        teacher_logits = self.teacher_model(teacher_inputs)
                     loss = self.distillation_helper.combined_loss(
                         hard_loss=loss,
                         student_logits=logits,
@@ -731,6 +762,7 @@ class SignTrainer:
                 # Move to device
                 landmarks = landmarks.to(self.device)
                 labels = labels.to(self.device)
+                landmarks = self._align_landmarks_for_model(landmarks, self.model)
 
                 # Forward pass
                 with self._autocast_context():
@@ -760,6 +792,7 @@ class SignTrainer:
             for landmarks, labels in val_loader:
                 landmarks = landmarks.to(self.device)
                 labels = labels.to(self.device)
+                landmarks = self._align_landmarks_for_model(landmarks, self.model)
                 with self._autocast_context():
                     logits = self.model(landmarks)
                 preds = torch.argmax(logits, dim=1)
@@ -857,6 +890,7 @@ class SignTrainer:
             for landmarks, labels in loader:
                 landmarks = landmarks.to(self.device)
                 labels = labels.to(self.device).long()
+                landmarks = self._align_landmarks_for_model(landmarks, self.model)
                 with self._autocast_context():
                     logits = self.model(landmarks)
                     probs = torch.softmax(logits, dim=1)
@@ -1043,14 +1077,22 @@ class SignTrainer:
                     )
 
                 # Train
+                optimizer_steps_before_epoch = self._optimizer_step_count
                 train_loss, train_accuracy = self.train_epoch(epoch_train_loader)
+                optimizer_steps_in_epoch = self._optimizer_step_count - optimizer_steps_before_epoch
 
                 # Validate
                 val_loss, val_accuracy = self.validate(val_loader)
                 self._maybe_update_swa(epoch + 1)
 
                 # Scheduler step
-                self.scheduler.step()
+                if optimizer_steps_in_epoch > 0:
+                    self.scheduler.step()
+                else:
+                    logger.warning(
+                        "scheduler_step_skipped_no_optimizer_updates",
+                        epoch=epoch + 1,
+                    )
                 current_lr = float(self.optimizer.param_groups[0]["lr"])
 
                 # Metrics

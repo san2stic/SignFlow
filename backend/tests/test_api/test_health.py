@@ -13,3 +13,11 @@ def test_healthcheck() -> None:
         response = client.get("/healthz")
         assert response.status_code == 200
         assert response.json() == {"status": "ok"}
+
+
+def test_healthcheck_legacy_alias() -> None:
+    """Legacy health endpoint should remain available for compatibility."""
+    with TestClient(app) as client:
+        response = client.get("/health")
+        assert response.status_code == 200
+        assert response.json() == {"status": "ok"}

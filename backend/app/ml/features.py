@@ -8,7 +8,34 @@ from pathlib import Path
 import numpy as np
 import structlog
 
+from app.ml.feature_engineering import FACIAL_EXPRESSION_FEATURE_DIM
+
 logger = structlog.get_logger(__name__)
+
+# MediaPipe FaceMesh indices for compact expression and mouth descriptors.
+_FACE_IDX_MOUTH_LEFT = 61
+_FACE_IDX_MOUTH_RIGHT = 291
+_FACE_IDX_UPPER_LIP = 13
+_FACE_IDX_LOWER_LIP = 14
+_FACE_IDX_LEFT_EYE_UPPER = 159
+_FACE_IDX_LEFT_EYE_LOWER = 145
+_FACE_IDX_RIGHT_EYE_UPPER = 386
+_FACE_IDX_RIGHT_EYE_LOWER = 374
+_FACE_IDX_LEFT_BROW = 70
+_FACE_IDX_RIGHT_BROW = 300
+
+FACIAL_FEATURE_MOUTH_OPEN = 0
+FACIAL_FEATURE_MOUTH_WIDTH = 1
+FACIAL_FEATURE_MOUTH_ROUNDNESS = 2
+FACIAL_FEATURE_SMILE = 3
+FACIAL_FEATURE_MOUTH_DETECTION_SCORE = 4
+FACIAL_FEATURE_MOUTH_OPEN_FLAG = 5
+FACIAL_FEATURE_LEFT_EYE_OPEN = 6
+FACIAL_FEATURE_RIGHT_EYE_OPEN = 7
+FACIAL_FEATURE_LEFT_BROW_RAISE = 8
+FACIAL_FEATURE_RIGHT_BROW_RAISE = 9
+FACIAL_FEATURE_BROW_ASYMMETRY = 10
+FACIAL_FEATURE_EXPRESSION_INTENSITY = 11
 
 
 @dataclass
@@ -57,8 +84,131 @@ def _resolve_body_scale(pose_xyz: np.ndarray) -> float:
     return scale
 
 
-def normalize_landmarks(frame: FrameLandmarks, include_face: bool = False) -> np.ndarray:
-    """Normalize coordinates relative to hip center and return feature vector."""
+def _face_point(face_xyz: np.ndarray, index: int) -> np.ndarray:
+    """Safely access one face landmark point as xyz vector."""
+    if index < 0 or index >= face_xyz.shape[0]:
+        return np.zeros(3, dtype=np.float32)
+    return face_xyz[index]
+
+
+def _compute_facial_expression_features(
+    face_points: list[list[float]] | None,
+    *,
+    hip_center: np.ndarray,
+    body_scale: float,
+) -> np.ndarray:
+    """
+    Build compact facial descriptors for expression and mouth detection.
+
+    Output layout (12 dims):
+      0 mouth_open
+      1 mouth_width
+      2 mouth_roundness
+      3 smile
+      4 mouth_detection_score
+      5 mouth_open_flag
+      6 left_eye_open
+      7 right_eye_open
+      8 left_brow_raise
+      9 right_brow_raise
+      10 brow_asymmetry
+      11 expression_intensity
+    """
+    features = np.zeros(FACIAL_EXPRESSION_FEATURE_DIM, dtype=np.float32)
+    if not face_points:
+        return features
+
+    face_raw = np.array(_flatten(face_points, 468), dtype=np.float32).reshape(-1, 3)
+    if face_raw.shape[0] == 0:
+        return features
+
+    normalized_face = (face_raw - hip_center.reshape(1, 3)) / max(float(body_scale), 1e-3)
+
+    mouth_upper = _face_point(normalized_face, _FACE_IDX_UPPER_LIP)
+    mouth_lower = _face_point(normalized_face, _FACE_IDX_LOWER_LIP)
+    mouth_left = _face_point(normalized_face, _FACE_IDX_MOUTH_LEFT)
+    mouth_right = _face_point(normalized_face, _FACE_IDX_MOUTH_RIGHT)
+
+    left_eye_upper = _face_point(normalized_face, _FACE_IDX_LEFT_EYE_UPPER)
+    left_eye_lower = _face_point(normalized_face, _FACE_IDX_LEFT_EYE_LOWER)
+    right_eye_upper = _face_point(normalized_face, _FACE_IDX_RIGHT_EYE_UPPER)
+    right_eye_lower = _face_point(normalized_face, _FACE_IDX_RIGHT_EYE_LOWER)
+
+    left_brow = _face_point(normalized_face, _FACE_IDX_LEFT_BROW)
+    right_brow = _face_point(normalized_face, _FACE_IDX_RIGHT_BROW)
+
+    mouth_open = _safe_norm(mouth_upper - mouth_lower)
+    mouth_width = _safe_norm(mouth_left - mouth_right)
+    mouth_roundness = mouth_open / max(mouth_width, 1e-6)
+
+    mouth_center_y = 0.5 * (mouth_upper[1] + mouth_lower[1])
+    smile_left = mouth_center_y - mouth_left[1]
+    smile_right = mouth_center_y - mouth_right[1]
+    smile = 0.5 * (smile_left + smile_right)
+
+    left_eye_open = _safe_norm(left_eye_upper - left_eye_lower)
+    right_eye_open = _safe_norm(right_eye_upper - right_eye_lower)
+
+    left_brow_raise = max(0.0, float(left_eye_upper[1] - left_brow[1]))
+    right_brow_raise = max(0.0, float(right_eye_upper[1] - right_brow[1]))
+    brow_asymmetry = abs(left_brow_raise - right_brow_raise)
+
+    tracked_points = [
+        _FACE_IDX_MOUTH_LEFT,
+        _FACE_IDX_MOUTH_RIGHT,
+        _FACE_IDX_UPPER_LIP,
+        _FACE_IDX_LOWER_LIP,
+        _FACE_IDX_LEFT_EYE_UPPER,
+        _FACE_IDX_LEFT_EYE_LOWER,
+        _FACE_IDX_RIGHT_EYE_UPPER,
+        _FACE_IDX_RIGHT_EYE_LOWER,
+        _FACE_IDX_LEFT_BROW,
+        _FACE_IDX_RIGHT_BROW,
+    ]
+    detected_count = sum(
+        1
+        for point_index in tracked_points
+        if _safe_norm(_face_point(face_raw, point_index)) > 1e-6
+    )
+    mouth_detection_score = detected_count / len(tracked_points)
+    mouth_open_flag = 1.0 if mouth_detection_score >= 0.5 and mouth_open > 0.012 else 0.0
+
+    expression_intensity = float(
+        np.mean(
+            [
+                mouth_open,
+                mouth_roundness,
+                abs(smile),
+                left_eye_open,
+                right_eye_open,
+                left_brow_raise,
+                right_brow_raise,
+            ]
+        )
+    )
+
+    features[FACIAL_FEATURE_MOUTH_OPEN] = float(mouth_open)
+    features[FACIAL_FEATURE_MOUTH_WIDTH] = float(mouth_width)
+    features[FACIAL_FEATURE_MOUTH_ROUNDNESS] = float(mouth_roundness)
+    features[FACIAL_FEATURE_SMILE] = float(smile)
+    features[FACIAL_FEATURE_MOUTH_DETECTION_SCORE] = float(mouth_detection_score)
+    features[FACIAL_FEATURE_MOUTH_OPEN_FLAG] = float(mouth_open_flag)
+    features[FACIAL_FEATURE_LEFT_EYE_OPEN] = float(left_eye_open)
+    features[FACIAL_FEATURE_RIGHT_EYE_OPEN] = float(right_eye_open)
+    features[FACIAL_FEATURE_LEFT_BROW_RAISE] = float(left_brow_raise)
+    features[FACIAL_FEATURE_RIGHT_BROW_RAISE] = float(right_brow_raise)
+    features[FACIAL_FEATURE_BROW_ASYMMETRY] = float(brow_asymmetry)
+    features[FACIAL_FEATURE_EXPRESSION_INTENSITY] = float(expression_intensity)
+
+    return np.nan_to_num(features, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32)
+
+
+def normalize_landmarks(
+    frame: FrameLandmarks,
+    include_face: bool = False,
+    include_face_expressions: bool = True,
+) -> np.ndarray:
+    """Normalize landmarks and return feature vector for one frame."""
     pose = _flatten(frame.pose, 33)
     hip_left = np.array(pose[23 * 3 : 23 * 3 + 3]) if len(pose) >= 75 else np.zeros(3)
     hip_right = np.array(pose[24 * 3 : 24 * 3 + 3]) if len(pose) >= 78 else np.zeros(3)
@@ -74,6 +224,14 @@ def normalize_landmarks(frame: FrameLandmarks, include_face: bool = False) -> np
     pose_vec = (pose_vec - hip_center) / body_scale
 
     chunks = [left.reshape(-1), right.reshape(-1), pose_vec.reshape(-1)]
+    if include_face_expressions:
+        chunks.append(
+            _compute_facial_expression_features(
+                frame.face,
+                hip_center=hip_center,
+                body_scale=body_scale,
+            )
+        )
     if include_face:
         face = np.array(_flatten(frame.face or [], 468)).reshape(-1, 3)
         chunks.append(((face - hip_center) / body_scale).reshape(-1))
@@ -97,6 +255,7 @@ class LandmarkExtractionResult:
 def extract_landmarks_from_video(
     video_path: str | Path,
     include_face: bool = False,
+    include_face_expressions: bool = True,
     min_detection_confidence: float = 0.5,
     min_tracking_confidence: float = 0.5,
 ) -> LandmarkExtractionResult:
@@ -106,6 +265,7 @@ def extract_landmarks_from_video(
     Args:
         video_path: Path to the video file
         include_face: Whether to include face landmarks (468 points)
+        include_face_expressions: Whether to append compact facial-expression features
         min_detection_confidence: Minimum confidence for detection
         min_tracking_confidence: Minimum confidence for tracking
 
@@ -200,8 +360,8 @@ def extract_landmarks_from_video(
             else:
                 pose = [[0.0, 0.0, 0.0]] * 33
 
-            # Face landmarks (468 points) - optional
-            if include_face:
+            # Face landmarks are needed for full face export or compact expression features.
+            if include_face or include_face_expressions:
                 if results.face_landmarks:
                     face = [
                         [lm.x, lm.y, lm.z] for lm in results.face_landmarks.landmark
@@ -224,10 +384,14 @@ def extract_landmarks_from_video(
                 left_hand=left_hand,
                 right_hand=right_hand,
                 pose=pose,
-                face=face if include_face else None,
+                face=face if (include_face or include_face_expressions) else None,
             )
 
-            normalized = normalize_landmarks(frame_landmarks, include_face=include_face)
+            normalized = normalize_landmarks(
+                frame_landmarks,
+                include_face=include_face,
+                include_face_expressions=include_face_expressions,
+            )
             landmarks_list.append(normalized)
 
     finally:

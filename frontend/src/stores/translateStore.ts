@@ -1,7 +1,9 @@
 import { create } from "zustand";
 
+const MIN_VISIBLE_PREDICTION_CONFIDENCE = 0.2;
 const MIN_STICKY_CONFIDENCE = 0.55;
-const STICKY_PREDICTION_HOLD_MS = 1500;
+const STICKY_PREDICTION_HOLD_MS = 3000;
+const TRANSIENT_PREDICTION_HOLD_MS = 1200;
 
 export interface PredictionState {
   prediction: string;
@@ -29,8 +31,10 @@ export const useTranslateStore = create<TranslateStore>((set) => ({
   setLive: (value) =>
     set((state) => {
       const now = Date.now();
-      const isConfidentPrediction =
-        value.prediction !== "NONE" && value.prediction !== "RECORDING" && value.confidence >= MIN_STICKY_CONFIDENCE;
+      const isNonEmptyPrediction = value.prediction !== "NONE" && value.prediction !== "RECORDING";
+      const isVisiblePrediction = isNonEmptyPrediction && value.confidence >= MIN_VISIBLE_PREDICTION_CONFIDENCE;
+      const isConfidentPrediction = isVisiblePrediction && value.confidence >= MIN_STICKY_CONFIDENCE;
+      const isSameAsDisplayed = state.displayedPrediction === value.prediction;
 
       let displayedPrediction = state.displayedPrediction;
       let displayedConfidence = state.displayedConfidence;
@@ -40,17 +44,21 @@ export const useTranslateStore = create<TranslateStore>((set) => ({
         displayedPrediction = value.prediction;
         displayedConfidence = value.confidence;
         displayUntilMs = now + STICKY_PREDICTION_HOLD_MS;
-      } else if (value.prediction !== "NONE" && value.prediction !== "RECORDING" && now >= state.displayUntilMs) {
-        displayedPrediction = value.prediction;
-        displayedConfidence = value.confidence;
-        displayUntilMs = now;
+      } else if (isVisiblePrediction) {
+        const canPromoteTransientPrediction = now >= state.displayUntilMs || isSameAsDisplayed || state.displayedPrediction === "NONE";
+
+        if (canPromoteTransientPrediction) {
+          displayedPrediction = value.prediction;
+          displayedConfidence = isSameAsDisplayed ? Math.max(state.displayedConfidence, value.confidence) : value.confidence;
+          displayUntilMs = Math.max(state.displayUntilMs, now + TRANSIENT_PREDICTION_HOLD_MS);
+        }
       } else if (now >= state.displayUntilMs) {
         displayedPrediction = "NONE";
         displayedConfidence = 0;
         displayUntilMs = 0;
       }
 
-      const shouldPushHistory = value.prediction !== "NONE" && value.prediction !== "RECORDING" && value.confidence >= 0.7;
+      const shouldPushHistory = isNonEmptyPrediction && value.confidence >= 0.7;
       const history =
         shouldPushHistory && state.history[0] !== value.prediction
           ? [value.prediction, ...state.history].slice(0, 30)

@@ -79,8 +79,8 @@ class LandmarkDataset(Dataset):
             stride: Stride for sliding window (default: 10 frames)
             apply_sliding_window: If True, apply sliding window (legacy mode);
                 if False, use temporal resampling (new default)
-            use_enriched_features: If True, compute enriched features (469 dims)
-                after resampling; if False, keep raw 225-dim landmarks
+            use_enriched_features: If True, compute enriched features
+                after resampling; if False, keep raw landmark channels
         """
         self.sequence_length = sequence_length
         self.stride = stride

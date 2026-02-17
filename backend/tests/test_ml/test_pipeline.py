@@ -180,6 +180,50 @@ def test_pipeline_class_threshold_lookup_supports_none_alias() -> None:
     assert pipeline._threshold_for_label("NONE") == 0.91
 
 
+def test_pipeline_class_threshold_can_lower_effective_threshold_when_quality_good() -> None:
+    """A tuned per-class threshold should be used as baseline in good tracking conditions."""
+    pipeline = SignFlowInferencePipeline(
+        confidence_threshold=0.7,
+        class_thresholds={"bonjour": 0.25},
+    )
+    pipeline.hand_visibility_history.extend([0.95, 0.92, 0.9])
+    pipeline.motion_history.extend([0.02, 0.018, 0.021])
+    pipeline._latest_frontend_confidence = 0.95
+
+    output = pipeline._build_prediction_response(
+        predicted_label="bonjour",
+        predicted_confidence=0.3,
+        alternatives=[],
+    )
+
+    assert output.prediction == "bonjour"
+    assert output.confidence >= 0.3
+    assert output.decision_diagnostics is not None
+    assert output.decision_diagnostics["effective_threshold"] <= 0.3
+
+
+def test_pipeline_quality_penalty_still_raises_class_threshold() -> None:
+    """Low tracking quality should tighten even class-tuned thresholds."""
+    pipeline = SignFlowInferencePipeline(
+        confidence_threshold=0.7,
+        class_thresholds={"bonjour": 0.25},
+    )
+    pipeline.hand_visibility_history.extend([0.05, 0.04, 0.06])
+    pipeline.motion_history.extend([0.0005, 0.0004, 0.0006])
+    pipeline._latest_frontend_confidence = 0.2
+
+    output = pipeline._build_prediction_response(
+        predicted_label="bonjour",
+        predicted_confidence=0.3,
+        alternatives=[],
+    )
+
+    assert output.prediction == "NONE"
+    assert output.confidence == 0.0
+    assert output.decision_diagnostics is not None
+    assert output.decision_diagnostics["effective_threshold"] > 0.3
+
+
 def test_pipeline_set_labels_keeps_none_class() -> None:
     """NONE class should stay available for open-set decoding."""
     pipeline = SignFlowInferencePipeline()

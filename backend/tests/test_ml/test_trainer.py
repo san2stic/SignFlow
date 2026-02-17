@@ -106,6 +106,41 @@ def test_trainer_curriculum_progressively_expands_train_subset() -> None:
     assert seen_sizes[-1] == len(train_dataset)
 
 
+def test_scheduler_step_skipped_when_no_optimizer_updates() -> None:
+    """Scheduler should not step when an epoch performs no optimizer update."""
+    rng = np.random.default_rng(11)
+    samples = [
+        SignSample(landmarks=rng.standard_normal((32, 225)).astype(np.float32), label=0),
+        SignSample(landmarks=rng.standard_normal((32, 225)).astype(np.float32), label=1),
+    ]
+    train_dataset = LandmarkDataset(samples, sequence_length=32)
+    val_dataset = LandmarkDataset(samples, sequence_length=32)
+
+    model = SignTransformer(num_features=ENRICHED_FEATURE_DIM, num_classes=2)
+    config = TrainingConfig(
+        num_epochs=1,
+        batch_size=2,
+        num_workers=0,
+        device="cpu",
+        use_mlflow=False,
+    )
+    trainer = SignTrainer(model=model, config=config)
+
+    scheduler_step_calls = 0
+
+    def fake_scheduler_step() -> None:
+        nonlocal scheduler_step_calls
+        scheduler_step_calls += 1
+
+    trainer.scheduler.step = fake_scheduler_step  # type: ignore[assignment]
+    trainer.train_epoch = lambda _loader: (0.7, 0.5)  # type: ignore[method-assign]
+    trainer.validate = lambda _loader: (0.6, 0.5)  # type: ignore[method-assign]
+
+    _ = trainer.fit(train_dataset, val_dataset)
+
+    assert scheduler_step_calls == 0
+
+
 def test_save_model_logs_checkpoint_artifact_to_mlflow_run(tmp_path) -> None:
     """Checkpoint save should also push artifact + metadata into MLflow."""
     model = SignTransformer(num_features=ENRICHED_FEATURE_DIM, num_classes=2)

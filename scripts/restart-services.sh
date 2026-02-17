@@ -51,7 +51,7 @@ docker compose $COMPOSE_FILES ps
 echo -e "\n${BLUE}🏥 Health Checks:${NC}"
 
 # Backend
-if curl -s http://localhost:8000/health > /dev/null 2>&1; then
+if curl -s http://localhost:8000/healthz > /dev/null 2>&1; then
     echo -e "  ${GREEN}✓${NC} Backend (http://localhost:8000)"
 else
     echo -e "  ${RED}✗${NC} Backend (http://localhost:8000)"

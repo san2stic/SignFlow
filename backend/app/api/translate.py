@@ -27,6 +27,7 @@ from app.ml.pipeline import SignFlowInferencePipeline
 from app.ml.torchserve_client import TorchServeClient
 from app.models.model_version import ModelVersion
 from app.models.sign import Sign
+from app.utils.model_artifacts import discover_local_model_artifacts, resolve_model_artifact_path
 
 router = APIRouter()
 logger = structlog.get_logger(__name__)
@@ -70,10 +71,58 @@ def _load_checkpoint_runtime_metadata(model_path: str) -> dict[str, object]:
         return {}
     config = checkpoint.get("config") or {}
     metadata = checkpoint.get("metadata") or {}
+    calibration = metadata.get("calibration") or {}
+    class_labels = checkpoint.get("class_labels")
+    if not isinstance(class_labels, list):
+        class_labels = metadata.get("class_labels")
+    if not isinstance(class_labels, list):
+        class_labels = []
+    class_thresholds = metadata.get("class_thresholds")
+    if not isinstance(class_thresholds, dict):
+        class_thresholds = {}
     return {
         "sequence_length": config.get("sequence_length"),
-        "calibration_temperature": metadata.get("calibration_temperature"),
+        "calibration_temperature": metadata.get("calibration_temperature") or calibration.get("temperature"),
+        "class_labels": [str(label) for label in class_labels if label],
+        "class_thresholds": class_thresholds,
     }
+
+
+def _normalize_labels(raw_labels: object) -> list[str]:
+    """Normalize runtime label payloads into a compact string list."""
+    if not isinstance(raw_labels, list):
+        return []
+    normalized = [str(label) for label in raw_labels if str(label).strip()]
+    return normalized
+
+
+def _resolve_model_version_path(model: ModelVersion | None, *, model_dir: str) -> Path | None:
+    """Resolve a model-version artifact path against runtime directories."""
+    if model is None or not model.file_path:
+        return None
+    return resolve_model_artifact_path(model.file_path, model_dir=model_dir)
+
+
+def _find_latest_valid_model_version(db: Session, *, model_dir: str) -> tuple[ModelVersion, Path] | None:
+    """Return the most recent model version whose artifact exists on disk."""
+    candidates = db.scalars(select(ModelVersion).order_by(ModelVersion.created_at.desc())).all()
+    for candidate in candidates:
+        resolved = _resolve_model_version_path(candidate, model_dir=model_dir)
+        if resolved is not None:
+            return candidate, resolved
+    return None
+
+
+def _set_active_model(db: Session, *, model_id: str) -> None:
+    """Mark one model as active and deactivate all others."""
+    changed = False
+    for candidate in db.scalars(select(ModelVersion)).all():
+        should_be_active = candidate.id == model_id
+        if bool(candidate.is_active) != should_be_active:
+            candidate.is_active = should_be_active
+            changed = True
+    if changed:
+        db.commit()
 
 
 def _extract_sentence_tokens(sentence_buffer: str) -> list[str]:
@@ -141,20 +190,98 @@ def get_or_create_pipeline() -> SignFlowInferencePipeline:
             .where(ModelVersion.is_active.is_(True))
             .order_by(ModelVersion.created_at.desc())
         )
-        labels = _resolve_pipeline_labels(db, active_model)
+        resolved_model_path = _resolve_model_version_path(active_model, model_dir=settings.model_dir)
 
-        if active_model and Path(active_model.file_path).exists():
+        if active_model is not None and resolved_model_path is None:
+            logger.warning(
+                "active_model_artifact_missing",
+                version=active_model.version,
+                stored_path=active_model.file_path,
+            )
+
+        if resolved_model_path is None:
+            fallback_version = _find_latest_valid_model_version(db, model_dir=settings.model_dir)
+            if fallback_version is not None:
+                active_model, resolved_model_path = fallback_version
+                if not active_model.is_active:
+                    logger.warning(
+                        "active_model_auto_repaired",
+                        activated_version=active_model.version,
+                        activated_model_id=active_model.id,
+                    )
+                    _set_active_model(db, model_id=active_model.id)
+            else:
+                local_artifacts = discover_local_model_artifacts(model_dir=settings.model_dir)
+                if local_artifacts:
+                    artifact_path = local_artifacts[0]
+                    checkpoint_runtime = _load_checkpoint_runtime_metadata(str(artifact_path))
+                    runtime_labels = _normalize_labels(checkpoint_runtime.get("class_labels"))
+                    labels = runtime_labels or _resolve_pipeline_labels(db, None)
+                    sequence_length = int(checkpoint_runtime.get("sequence_length") or settings.translate_seq_len)
+                    calibration_temperature = checkpoint_runtime.get("calibration_temperature")
+                    runtime_class_thresholds = checkpoint_runtime.get("class_thresholds")
+                    class_thresholds = (
+                        runtime_class_thresholds
+                        if isinstance(runtime_class_thresholds, dict)
+                        else {}
+                    )
+                    pipeline = SignFlowInferencePipeline(
+                        model_path=str(artifact_path),
+                        model_version=artifact_path.stem,
+                        seq_len=max(8, min(256, sequence_length)),
+                        confidence_threshold=settings.translate_confidence_threshold,
+                        inference_num_views=settings.translate_inference_num_views,
+                        inference_temperature=settings.translate_inference_temperature,
+                        max_view_disagreement=settings.translate_max_view_disagreement,
+                        tta_enable_mirror=settings.translate_tta_enable_mirror,
+                        tta_enable_temporal_jitter=settings.translate_tta_enable_temporal_jitter,
+                        tta_enable_spatial_noise=settings.translate_tta_enable_spatial_noise,
+                        tta_temporal_jitter_ratio=settings.translate_tta_temporal_jitter_ratio,
+                        tta_spatial_noise_std=settings.translate_tta_spatial_noise_std,
+                        calibration_temperature=(
+                            float(calibration_temperature)
+                            if calibration_temperature is not None
+                            else None
+                        ),
+                        class_thresholds=(
+                            class_thresholds if isinstance(class_thresholds, dict) else {}
+                        ),
+                        device="cpu",
+                    )
+                    pipeline.set_labels(labels)
+                    logger.warning(
+                        "pipeline_initialized_from_local_artifact",
+                        path=str(artifact_path),
+                        labels=len(labels),
+                    )
+                    _global_pipeline = pipeline
+                    return pipeline
+
+        if active_model and resolved_model_path is not None:
             try:
                 model_metadata = active_model.artifact_metadata or {}
             except Exception:  # noqa: BLE001
                 model_metadata = {}
             calibration = model_metadata.get("calibration", {}) if isinstance(model_metadata, dict) else {}
-            class_thresholds = (
+            model_class_thresholds = (
                 model_metadata.get("class_thresholds", {})
                 if isinstance(model_metadata, dict)
                 else {}
             )
-            checkpoint_runtime = _load_checkpoint_runtime_metadata(active_model.file_path)
+            checkpoint_runtime = _load_checkpoint_runtime_metadata(str(resolved_model_path))
+            runtime_labels = _normalize_labels(checkpoint_runtime.get("class_labels"))
+            if active_model.class_labels:
+                labels = _resolve_pipeline_labels(db, active_model)
+            else:
+                labels = runtime_labels or _resolve_pipeline_labels(db, active_model)
+            runtime_class_thresholds = checkpoint_runtime.get("class_thresholds")
+            class_thresholds = (
+                model_class_thresholds
+                if isinstance(model_class_thresholds, dict) and model_class_thresholds
+                else runtime_class_thresholds
+                if isinstance(runtime_class_thresholds, dict)
+                else {}
+            )
             sequence_length = int(
                 checkpoint_runtime.get("sequence_length")
                 or settings.translate_seq_len
@@ -166,10 +293,10 @@ def get_or_create_pipeline() -> SignFlowInferencePipeline:
             logger.info(
                 "loading_active_model",
                 version=active_model.version,
-                path=active_model.file_path,
+                path=str(resolved_model_path),
             )
             pipeline = SignFlowInferencePipeline(
-                model_path=active_model.file_path,
+                model_path=str(resolved_model_path),
                 model_version=active_model.version,
                 seq_len=max(8, min(256, sequence_length)),
                 confidence_threshold=settings.translate_confidence_threshold,
@@ -211,7 +338,7 @@ def get_or_create_pipeline() -> SignFlowInferencePipeline:
                 tta_temporal_jitter_ratio=settings.translate_tta_temporal_jitter_ratio,
                 tta_spatial_noise_std=settings.translate_tta_spatial_noise_std,
             )
-            pipeline.set_labels(labels)
+            pipeline.set_labels(_resolve_pipeline_labels(db, active_model))
 
         _global_pipeline = pipeline
         return pipeline
@@ -250,7 +377,8 @@ def load_pipeline_for_model(model_id: str) -> SignFlowInferencePipeline | None:
     db = SessionLocal()
     try:
         model = db.get(ModelVersion, model_id)
-        if model is None or not model.file_path or not Path(model.file_path).exists():
+        resolved_model_path = _resolve_model_version_path(model, model_dir=settings.model_dir)
+        if model is None or resolved_model_path is None:
             return None
 
         labels = _resolve_pipeline_labels(db, model)
@@ -264,7 +392,10 @@ def load_pipeline_for_model(model_id: str) -> SignFlowInferencePipeline | None:
             if isinstance(model_metadata, dict)
             else {}
         )
-        checkpoint_runtime = _load_checkpoint_runtime_metadata(model.file_path)
+        checkpoint_runtime = _load_checkpoint_runtime_metadata(str(resolved_model_path))
+        runtime_labels = _normalize_labels(checkpoint_runtime.get("class_labels"))
+        if not model.class_labels and runtime_labels:
+            labels = runtime_labels
         sequence_length = int(
             checkpoint_runtime.get("sequence_length")
             or settings.translate_seq_len
@@ -274,7 +405,7 @@ def load_pipeline_for_model(model_id: str) -> SignFlowInferencePipeline | None:
             calibration_temperature = checkpoint_runtime.get("calibration_temperature")
 
         pipeline = SignFlowInferencePipeline(
-            model_path=model.file_path,
+            model_path=str(resolved_model_path),
             model_version=model.version,
             seq_len=max(8, min(256, sequence_length)),
             confidence_threshold=settings.translate_confidence_threshold,

@@ -12,6 +12,7 @@ import numpy as np
 import structlog
 import torch
 
+from app.ml.feature_alignment import align_numpy_features, resolve_model_feature_dim
 from app.ml.features import FrameLandmarks, normalize_landmarks
 from app.ml.model import SignTransformer
 from app.ml.tta import TTAConfig, TTAGenerator
@@ -378,7 +379,11 @@ class SignFlowInferencePipeline:
         hand_visibility = self._blend_hand_visibility(raw_hand_visibility, frontend_confidence)
         self.hand_visibility_history.append(hand_visibility)
 
-        features = normalize_landmarks(frame, include_face=False)
+        features = normalize_landmarks(
+            frame,
+            include_face=False,
+            include_face_expressions=True,
+        )
         self.frame_buffer.append(features)
         self._current_motion_energy = self._compute_motion_energy()
         self.motion_history.append(self._current_motion_energy)
@@ -462,7 +467,11 @@ class SignFlowInferencePipeline:
         hand_visibility = self._blend_hand_visibility(raw_hand_visibility, frontend_confidence)
         self.hand_visibility_history.append(hand_visibility)
 
-        features = normalize_landmarks(frame, include_face=False)
+        features = normalize_landmarks(
+            frame,
+            include_face=False,
+            include_face_expressions=True,
+        )
         self.frame_buffer.append(features)
         self._current_motion_energy = self._compute_motion_energy()
         self.motion_history.append(self._current_motion_energy)
@@ -612,7 +621,12 @@ class SignFlowInferencePipeline:
 
         adaptive_threshold = self._adaptive_threshold()
         label_threshold = self._threshold_for_label(normalized_label)
-        effective_threshold = max(adaptive_threshold, label_threshold)
+        quality_delta = max(0.0, float(adaptive_threshold) - float(self.confidence_threshold))
+        if label_threshold > 0:
+            # Per-class thresholds define the baseline; quality penalties still tighten it.
+            effective_threshold = min(0.95, float(label_threshold) + quality_delta)
+        else:
+            effective_threshold = adaptive_threshold
         filtered_label, filtered_confidence, filter_trace = self._apply_prediction_filters(
             prediction=normalized_label,
             confidence=normalized_confidence,
@@ -623,6 +637,7 @@ class SignFlowInferencePipeline:
             "prediction_before_filters": self._last_decision_trace,
             "adaptive_threshold": round(float(adaptive_threshold), 4),
             "class_threshold": round(float(label_threshold), 4),
+            "quality_delta": round(float(quality_delta), 4),
             "effective_threshold": round(float(effective_threshold), 4),
             "filter_trace": filter_trace,
             "counters": dict(self._decision_counters),
@@ -798,13 +813,32 @@ class SignFlowInferencePipeline:
         # PyTorch inference path
         return self._infer_probabilities_pytorch(views)
 
+    def _resolve_runtime_feature_dim(self) -> int | None:
+        """Resolve expected model input width for compatibility across checkpoints."""
+        feature_dim = resolve_model_feature_dim(self.model)
+        if feature_dim is not None:
+            return feature_dim
+
+        if self.use_onnx and self.onnx_session is not None:
+            try:
+                input_shape = self.onnx_session.get_inputs()[0].shape
+                if len(input_shape) >= 3:
+                    candidate = input_shape[2]
+                    if isinstance(candidate, (int, np.integer)) and int(candidate) > 0:
+                        return int(candidate)
+            except Exception:  # noqa: BLE001
+                return None
+        return None
+
     def _infer_probabilities_pytorch(self, views: list[np.ndarray]) -> tuple[np.ndarray, float]:
         """Run PyTorch inference on multiple views."""
         stacked_probs: list[torch.Tensor] = []
+        target_dim = self._resolve_runtime_feature_dim()
 
         with torch.no_grad():
             for view in views:
-                tensor = torch.from_numpy(view).float().unsqueeze(0).to(self.device)
+                aligned_view = align_numpy_features(view, target_dim)
+                tensor = torch.from_numpy(aligned_view).float().unsqueeze(0).to(self.device)
                 logits = self.model(tensor)
                 softmax_temp = self.calibration_temperature or self.inference_temperature
                 probs = torch.softmax(logits / softmax_temp, dim=1)
@@ -822,10 +856,16 @@ class SignFlowInferencePipeline:
     def _infer_probabilities_onnx(self, views: list[np.ndarray]) -> tuple[np.ndarray, float]:
         """Run ONNX Runtime inference on multiple views."""
         stacked_probs: list[np.ndarray] = []
+        target_dim = self._resolve_runtime_feature_dim()
 
         for view in views:
+            aligned_view = align_numpy_features(view, target_dim)
             # Prepare input: [1, seq_len, features]
-            onnx_input = view.astype(np.float32).reshape(1, view.shape[0], view.shape[1])
+            onnx_input = aligned_view.astype(np.float32).reshape(
+                1,
+                aligned_view.shape[0],
+                aligned_view.shape[1],
+            )
 
             # Run ONNX inference
             input_name = self.onnx_session.get_inputs()[0].name

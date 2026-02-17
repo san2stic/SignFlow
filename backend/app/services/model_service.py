@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 from fastapi import HTTPException, status
@@ -18,6 +17,7 @@ from app.schemas.model_version import (
     ModelVersionActivateResponse,
     ModelVersionExportResponse,
 )
+from app.utils.model_artifacts import resolve_model_artifact_path
 
 
 class ModelService:
@@ -95,8 +95,12 @@ class ModelService:
         export_dir.mkdir(parents=True, exist_ok=True)
         out_path = export_dir / f"{model.version}.{fmt}"
 
-        if os.path.exists(model.file_path):
-            data = Path(model.file_path).read_bytes()
+        resolved_model_path = resolve_model_artifact_path(
+            model.file_path,
+            model_dir=settings.model_dir,
+        )
+        if resolved_model_path is not None:
+            data = resolved_model_path.read_bytes()
             out_path.write_bytes(data)
         else:
             out_path.write_text("placeholder model artifact", encoding="utf-8")

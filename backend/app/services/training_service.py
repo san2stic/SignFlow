@@ -28,7 +28,16 @@ from app.config import Settings, get_settings
 from app.database import SessionLocal
 from app.ml.augmentation import augment_dataset
 from app.ml.dataset import LandmarkDataset, SignSample, load_landmarks_from_file
-from app.ml.feature_engineering import ENRICHED_FEATURE_DIM
+from app.ml.feature_alignment import align_torch_features, resolve_model_feature_dim
+from app.ml.feature_engineering import (
+    COORDINATE_FEATURE_DIM,
+    FACIAL_EXPRESSION_FEATURE_DIM,
+    ENRICHED_FEATURE_DIM,
+    HAND_SHAPE_FEATURE_DIM,
+    INTER_HAND_DISTANCE_DIM,
+    JOINT_ANGLE_DIM,
+    VELOCITY_FEATURE_DIM,
+)
 from app.ml.fewshot import prepare_few_shot_model
 from app.ml.model import SignTransformer
 from app.ml.prototypical import run_prototypical_fallback
@@ -44,6 +53,7 @@ from app.models.sign import Sign
 from app.models.training import TrainingSession
 from app.models.video import Video
 from app.schemas.training import TrainingConfig, TrainingSessionCreate
+from app.utils.model_artifacts import resolve_model_artifact_path
 
 logger = structlog.get_logger(__name__)
 
@@ -509,6 +519,7 @@ class TrainingService:
         torch_device = torch.device(device)
         model = model.to(torch_device)
         model.eval()
+        target_dim = resolve_model_feature_dim(model)
 
         logits_chunks: list[np.ndarray] = []
         label_chunks: list[np.ndarray] = []
@@ -516,7 +527,8 @@ class TrainingService:
         with torch.no_grad():
             for _ in range(repeat_count):
                 for landmarks, labels in loader:
-                    logits = model(landmarks.to(torch_device))
+                    tensor = align_torch_features(landmarks.to(torch_device), target_dim)
+                    logits = model(tensor)
                     logits_chunks.append(logits.detach().cpu().numpy())
                     label_chunks.append(labels.detach().cpu().numpy())
 
@@ -1452,6 +1464,7 @@ class TrainingService:
         torch_device = torch.device(device)
         model = model.to(torch_device)
         model.eval()
+        target_dim = resolve_model_feature_dim(model)
 
         def _predict_probs(batch_inputs: np.ndarray) -> np.ndarray:
             batch_size = 32
@@ -1460,6 +1473,7 @@ class TrainingService:
                 for start in range(0, batch_inputs.shape[0], batch_size):
                     stop = min(batch_inputs.shape[0], start + batch_size)
                     tensor = torch.from_numpy(batch_inputs[start:stop]).float().to(torch_device)
+                    tensor = align_torch_features(tensor, target_dim)
                     logits = model(tensor)
                     logits_parts.append(logits.detach().cpu().numpy())
             logits_all = np.concatenate(logits_parts, axis=0).astype(np.float32)
@@ -1475,12 +1489,28 @@ class TrainingService:
         report["baseline_f1_macro"] = round(baseline_f1, 4)
 
         feature_dim = int(inputs.shape[2])
+        coord_end = min(COORDINATE_FEATURE_DIM, feature_dim)
+        velocity_start = coord_end
+        velocity_end = min(velocity_start + VELOCITY_FEATURE_DIM, feature_dim)
+        hand_distance_start = velocity_end
+        hand_distance_end = min(hand_distance_start + INTER_HAND_DISTANCE_DIM, feature_dim)
+        joint_start = hand_distance_end
+        joint_end = min(joint_start + JOINT_ANGLE_DIM, feature_dim)
+        hand_shape_start = joint_end
+        hand_shape_end = min(hand_shape_start + HAND_SHAPE_FEATURE_DIM, feature_dim)
+        facial_start = hand_shape_end
+        facial_end = min(facial_start + FACIAL_EXPRESSION_FEATURE_DIM, feature_dim)
+        facial_velocity_start = facial_end
+        facial_velocity_end = min(facial_velocity_start + FACIAL_EXPRESSION_FEATURE_DIM, feature_dim)
+
         groups = [
-            ("landmarks_raw", 0, min(225, feature_dim)),
-            ("velocity", min(225, feature_dim), min(450, feature_dim)),
-            ("inter_hand_distances", min(450, feature_dim), min(455, feature_dim)),
-            ("joint_angles", min(455, feature_dim), min(459, feature_dim)),
-            ("hand_shape", min(459, feature_dim), min(ENRICHED_FEATURE_DIM, feature_dim)),
+            ("landmarks_raw", 0, coord_end),
+            ("velocity", velocity_start, velocity_end),
+            ("inter_hand_distances", hand_distance_start, hand_distance_end),
+            ("joint_angles", joint_start, joint_end),
+            ("hand_shape", hand_shape_start, hand_shape_end),
+            ("facial_expression", facial_start, facial_end),
+            ("facial_expression_velocity", facial_velocity_start, facial_velocity_end),
         ]
 
         entries: list[dict[str, object]] = []
@@ -1779,6 +1809,7 @@ class TrainingService:
         torch_device = torch.device(device)
         model = model.to(torch_device)
         model.eval()
+        target_dim = resolve_model_feature_dim(model)
 
         timings: list[float] = []
         with torch.no_grad():
@@ -1786,7 +1817,8 @@ class TrainingService:
                 if index >= max_samples:
                     break
                 start = time.perf_counter()
-                _ = model(landmarks.to(torch_device))
+                tensor = align_torch_features(landmarks.to(torch_device), target_dim)
+                _ = model(tensor)
                 duration_ms = (time.perf_counter() - start) * 1000.0
                 timings.append(float(duration_ms))
 
@@ -1981,6 +2013,7 @@ class TrainingService:
     def run_training_session(self, session_id: str) -> None:
         """Execute real PyTorch training with landmark data."""
         db = SessionLocal()
+        settings = get_settings()
         try:
             session = db.get(TrainingSession, session_id)
             if not session:
@@ -2305,9 +2338,17 @@ class TrainingService:
                     )
 
                 if mode == "few-shot":
+                    resolved_active_model_path = (
+                        resolve_model_artifact_path(
+                            active_model.file_path,
+                            model_dir=settings.model_dir,
+                        )
+                        if active_model and active_model.file_path
+                        else None
+                    )
                     active_checkpoint = (
-                        active_model.file_path
-                        if active_model and active_model.file_path and Path(active_model.file_path).exists()
+                        str(resolved_active_model_path)
+                        if resolved_active_model_path is not None
                         else None
                     )
                     prepared = prepare_few_shot_model(
@@ -2349,12 +2390,16 @@ class TrainingService:
                 teacher_model: SignTransformer | None = None
                 use_distillation = bool(config.get("use_distillation", False))
                 teacher_model_path = str(config.get("teacher_model_path", "")).strip()
+                resolved_teacher_model_path = resolve_model_artifact_path(
+                    teacher_model_path,
+                    model_dir=settings.model_dir,
+                )
                 if use_distillation:
                     try:
-                        if teacher_model_path and Path(teacher_model_path).exists():
-                            teacher_model = load_model_checkpoint(teacher_model_path, device=device)
-                        elif mode == "few-shot" and active_model and active_model.file_path and Path(active_model.file_path).exists():
-                            teacher_model = load_model_checkpoint(active_model.file_path, device=device)
+                        if resolved_teacher_model_path is not None:
+                            teacher_model = load_model_checkpoint(str(resolved_teacher_model_path), device=device)
+                        elif mode == "few-shot" and active_checkpoint:
+                            teacher_model = load_model_checkpoint(active_checkpoint, device=device)
                     except Exception as exc:  # noqa: BLE001
                         logger.warning("teacher_model_load_failed", error=str(exc))
                         teacher_model = None
@@ -2505,7 +2550,6 @@ class TrainingService:
 
             try:
                 # Save model checkpoint
-                settings = get_settings()
                 models_dir = self._resolve_models_dir(settings)
 
                 # Create version

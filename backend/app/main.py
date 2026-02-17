@@ -149,6 +149,12 @@ def healthcheck() -> dict[str, str]:
     return {"status": "ok"}
 
 
+@app.get("/health", include_in_schema=False)
+def healthcheck_legacy() -> dict[str, str]:
+    """Backward-compatible health endpoint alias."""
+    return healthcheck()
+
+
 @app.get("/metrics", tags=["monitoring"])
 def metrics() -> Response:
     """Prometheus metrics endpoint."""

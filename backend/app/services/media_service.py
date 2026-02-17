@@ -206,6 +206,7 @@ class MediaService:
             result = extract_landmarks_from_video(
                 video_path=final_path,
                 include_face=False,  # Exclude face for performance
+                include_face_expressions=True,
                 min_detection_confidence=0.7,
                 min_tracking_confidence=0.7,
             )

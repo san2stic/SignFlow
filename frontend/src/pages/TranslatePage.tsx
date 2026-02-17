@@ -29,6 +29,8 @@ type UnknownPromptMode = "decision" | "assign";
 const UNKNOWN_PROMPT_GRACE_MS = 700;
 const UNKNOWN_PROMPT_COOLDOWN_MS = 3000;
 const UNKNOWN_PROMPT_RECOVERY_CONFIDENCE = 0.7;
+const WS_SEND_TARGET_FPS = 12;
+const WS_SEND_MIN_INTERVAL_MS = 1000 / WS_SEND_TARGET_FPS;
 
 function cameraHelpText(error: CameraError | null): string {
   if (!error) {
@@ -49,7 +51,7 @@ export function TranslatePage(): JSX.Element {
     videoRef,
     enabled: true, // ✅ FIX: Toujours activer MediaPipe (ne pas dépendre de cameraReady)
     targetFps: 30,
-    includeFace: false,
+    includeFace: true,
     modelComplexity: 2
   });
 
@@ -77,6 +79,7 @@ export function TranslatePage(): JSX.Element {
   const [isLoadingCandidates, setIsLoadingCandidates] = useState(false);
   const [assignError, setAssignError] = useState<string | null>(null);
   const lowConfidenceFrames = useRef(0);
+  const lastFrameSentAtRef = useRef(0);
   const unknownPromptTimer = useRef<number | null>(null);
   const cooldownResetTimer = useRef<number | null>(null);
   const promptCooldownRef = useRef(false);
@@ -172,18 +175,11 @@ export function TranslatePage(): JSX.Element {
 
   useEffect(() => {
     if (!frame || !ws.connected) return;
-
-    // ✅ FIX: Vérifier que la frame contient des landmarks valides avant l'envoi
-    const hasValidLandmarks =
-      (frame.hands.left.length > 0 && frame.hands.left.some(point => point[0] !== 0 || point[1] !== 0 || point[2] !== 0)) ||
-      (frame.hands.right.length > 0 && frame.hands.right.some(point => point[0] !== 0 || point[1] !== 0 || point[2] !== 0)) ||
-      (frame.pose.length > 0 && frame.pose.some(point => point[0] !== 0 || point[1] !== 0 || point[2] !== 0));
-
-    if (!hasValidLandmarks) {
-      // Console log pour débogage (peut être retiré en production)
-      console.debug('[TranslatePage] Frame sans landmarks valides ignorée');
+    const now = performance.now();
+    if (now - lastFrameSentAtRef.current < WS_SEND_MIN_INTERVAL_MS) {
       return;
     }
+    lastFrameSentAtRef.current = now;
 
     ws.send(serializeLandmarkFrame(frame));
   }, [frame, ws.connected, ws.send]);

@@ -1,12 +1,13 @@
 """Enriched feature computation for sign language landmark sequences.
 
-Transforms raw 225-dimensional landmark coordinates into ~469 features
-that capture motion, hand shape, and spatial relationships.
+Transforms raw landmark streams into richer descriptors that capture motion,
+hand shape, and compact facial-expression signals (including mouth dynamics).
 
-Feature layout of input (225 dims):
-  - [0:63]   left hand  (21 points * 3 coords)
-  - [63:126] right hand (21 points * 3 coords)
-  - [126:225] pose      (33 points * 3 coords)
+Raw input layout:
+  - [0:63]    left hand landmarks (21 points * 3 coords)
+  - [63:126]  right hand landmarks (21 points * 3 coords)
+  - [126:225] pose landmarks (33 points * 3 coords)
+  - [225:237] compact facial-expression features (mouth + brows + eyes)
 """
 from __future__ import annotations
 
@@ -19,6 +20,7 @@ _RIGHT_HAND_START = 63
 _RIGHT_HAND_END = 126
 _POSE_START = 126
 _POSE_END = 225
+_FACIAL_START = 225
 
 # Pose landmark indices (within pose block, each point = 3 values)
 _LEFT_SHOULDER = 11
@@ -38,8 +40,25 @@ _MIDDLE_TIP = 12
 _RING_TIP = 16
 _PINKY_TIP = 20
 
+COORDINATE_FEATURE_DIM = 225
+FACIAL_EXPRESSION_FEATURE_DIM = 12
+RAW_LANDMARK_FEATURE_DIM = COORDINATE_FEATURE_DIM + FACIAL_EXPRESSION_FEATURE_DIM
+VELOCITY_FEATURE_DIM = COORDINATE_FEATURE_DIM
+INTER_HAND_DISTANCE_DIM = 5
+JOINT_ANGLE_DIM = 4
+HAND_SHAPE_FEATURE_DIM = 10
+FACIAL_VELOCITY_FEATURE_DIM = FACIAL_EXPRESSION_FEATURE_DIM
+
 # Enriched feature dimension
-ENRICHED_FEATURE_DIM = 225 + 225 + 5 + 4 + 10  # 469
+ENRICHED_FEATURE_DIM = (
+    COORDINATE_FEATURE_DIM
+    + VELOCITY_FEATURE_DIM
+    + INTER_HAND_DISTANCE_DIM
+    + JOINT_ANGLE_DIM
+    + HAND_SHAPE_FEATURE_DIM
+    + FACIAL_EXPRESSION_FEATURE_DIM
+    + FACIAL_VELOCITY_FEATURE_DIM
+)
 
 
 def _pose_point(seq: np.ndarray, point_idx: int) -> np.ndarray:
@@ -120,7 +139,7 @@ def compute_joint_angles(seq: np.ndarray) -> np.ndarray:
 def compute_hand_shape_features(seq: np.ndarray) -> np.ndarray:
     """10 hand shape features: 5 per hand (openness, 4 finger extensions)."""
     num_frames = seq.shape[0]
-    features = np.zeros((num_frames, 10), dtype=np.float32)
+    features = np.zeros((num_frames, HAND_SHAPE_FEATURE_DIM), dtype=np.float32)
 
     for hand_idx, hand_start in enumerate([_LEFT_HAND_START, _RIGHT_HAND_START]):
         wrist = _hand_point(seq, hand_start, _WRIST)
@@ -166,18 +185,42 @@ def normalize_body_frame(seq: np.ndarray) -> np.ndarray:
     return points.reshape(normalized.shape)
 
 
+def _split_sequence_channels(seq: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Split sequence into coordinate and compact facial channels with safe padding."""
+    if seq.ndim != 2:
+        raise ValueError(f"Expected 2D sequence, got shape {seq.shape}")
+
+    num_frames = seq.shape[0]
+    coordinates = np.zeros((num_frames, COORDINATE_FEATURE_DIM), dtype=np.float32)
+    facial = np.zeros((num_frames, FACIAL_EXPRESSION_FEATURE_DIM), dtype=np.float32)
+
+    if seq.shape[1] > 0:
+        coord_dim = min(seq.shape[1], COORDINATE_FEATURE_DIM)
+        coordinates[:, :coord_dim] = seq[:, :coord_dim]
+
+    if seq.shape[1] > _FACIAL_START:
+        facial_dim = min(seq.shape[1] - _FACIAL_START, FACIAL_EXPRESSION_FEATURE_DIM)
+        facial[:, :facial_dim] = seq[:, _FACIAL_START:_FACIAL_START + facial_dim]
+
+    return coordinates, facial
+
+
 def compute_enriched_features(seq: np.ndarray) -> np.ndarray:
     """
-    Compute enriched features from raw 225-dim landmark sequence.
+    Compute enriched features from raw landmark sequence.
 
-    Input:  [num_frames, 225]
-    Output: [num_frames, ENRICHED_FEATURE_DIM]  (469)
+    Input:  [num_frames, >=225]
+    Output: [num_frames, ENRICHED_FEATURE_DIM]
     """
-    normalized = normalize_body_frame(seq)
+    coordinates, facial = _split_sequence_channels(seq)
+
+    normalized = normalize_body_frame(coordinates)
     velocities = compute_velocities(normalized)
     hand_distances = compute_hand_distances(normalized)
     joint_angles = compute_joint_angles(normalized)
     hand_shapes = compute_hand_shape_features(normalized)
+    facial = np.clip(facial, -5.0, 5.0).astype(np.float32)
+    facial_velocities = compute_velocities(facial)
 
     enriched = np.concatenate([
         normalized,
@@ -185,6 +228,8 @@ def compute_enriched_features(seq: np.ndarray) -> np.ndarray:
         hand_distances,
         joint_angles,
         hand_shapes,
+        facial,
+        facial_velocities,
     ], axis=1)
 
     return np.nan_to_num(enriched, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32)

@@ -6,7 +6,13 @@ from functools import lru_cache
 from typing import Literal
 
 from pydantic import Field
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+DEFAULT_JWT_SECRET = "your-secret-key-change-in-production-minimum-32-chars"
+DEFAULT_JWT_SECRET_LEGACY = "your-secret-key-change-in-production-minimum-32-chars-required-for-security"
+DEFAULT_JWT_SECRET_EXAMPLE = "replace-with-a-strong-random-secret-min-32-chars"
+MIN_JWT_SECRET_LENGTH = 32
 
 
 class Settings(BaseSettings):
@@ -84,9 +90,35 @@ class Settings(BaseSettings):
     mlflow_tracking_uri: str | None = None
 
     # JWT Authentication
-    jwt_secret_key: str = Field(default="your-secret-key-change-in-production-minimum-32-chars")
+    jwt_secret_key: str = Field(default=DEFAULT_JWT_SECRET)
     jwt_algorithm: str = "HS256"
     jwt_access_token_expire_minutes: int = Field(default=10080, ge=1, le=525600)  # 7 days default
+
+    @model_validator(mode="after")
+    def validate_security_settings(self) -> "Settings":
+        """Validate auth-related settings before app startup."""
+        jwt_secret = self.jwt_secret_key.strip()
+        if len(jwt_secret) < MIN_JWT_SECRET_LENGTH:
+            raise ValueError(
+                f"JWT_SECRET_KEY must be at least {MIN_JWT_SECRET_LENGTH} characters."
+            )
+
+        if self.env.lower() == "production":
+            known_placeholders = {
+                DEFAULT_JWT_SECRET,
+                DEFAULT_JWT_SECRET_LEGACY,
+                DEFAULT_JWT_SECRET_EXAMPLE,
+            }
+            if jwt_secret in known_placeholders:
+                raise ValueError(
+                    "JWT_SECRET_KEY uses a known placeholder value and is not allowed in production."
+                )
+            if any(marker in jwt_secret for marker in ("change-in-production", "replace-with-a-strong-random-secret")):
+                raise ValueError(
+                    "JWT_SECRET_KEY appears to be a template value and is not allowed in production."
+                )
+
+        return self
 
     @property
     def trusted_host_list(self) -> list[str]:
