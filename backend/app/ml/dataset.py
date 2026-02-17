@@ -183,32 +183,51 @@ class LandmarkDataset(Dataset):
 
 def load_landmarks_from_file(landmarks_path: str | Path) -> np.ndarray:
     """
-    Load landmarks from a .npy file.
+    Load landmarks from a .npy file (local) or S3 key (production).
+
+    En mode USE_S3_STORAGE=true, landmarks_path est une clé S3
+    (ex. "videos/training/uuid_landmarks.npy") et non un chemin absolu.
+    En mode dev, c'est un chemin local normal.
 
     Args:
-        landmarks_path: Path to .npy file
+        landmarks_path: Chemin local ou clé S3 vers le fichier .npy
 
     Returns:
         Numpy array of landmarks with shape [num_frames, num_features]
 
     Raises:
-        FileNotFoundError: If file doesn't exist
+        FileNotFoundError: If file doesn't exist (local mode)
         ValueError: If file is not a valid numpy array
     """
-    landmarks_path = Path(landmarks_path)
+    import io as _io
 
-    if not landmarks_path.exists():
-        raise FileNotFoundError(f"Landmarks file not found: {landmarks_path}")
+    path_str = str(landmarks_path)
 
     try:
-        landmarks = np.load(str(landmarks_path))
+        # Détecter si c'est une clé S3 (pas de slash initial) ou un chemin local
+        from app.config import get_settings
+        settings = get_settings()
+
+        if settings.use_s3_storage and not path_str.startswith("/"):
+            # Clé S3 : télécharger en mémoire depuis MinIO
+            from app.storage.factory import get_storage
+            data = get_storage().download_bytes(path_str, settings.s3_bucket_videos)
+            landmarks = np.load(_io.BytesIO(data))
+        else:
+            # Chemin local (dev ou ancienne entrée DB avec chemin absolu)
+            local_path = Path(path_str)
+            if not local_path.exists():
+                raise FileNotFoundError(f"Landmarks file not found: {local_path}")
+            landmarks = np.load(str(local_path))
 
         if landmarks.ndim != 2:
             raise ValueError(f"Expected 2D array, got shape {landmarks.shape}")
 
-        logger.debug("landmarks_loaded", path=str(landmarks_path), shape=landmarks.shape)
+        logger.debug("landmarks_loaded", path=path_str, shape=landmarks.shape)
         return landmarks
 
+    except (FileNotFoundError, ValueError):
+        raise
     except Exception as e:
-        logger.error("failed_to_load_landmarks", path=str(landmarks_path), error=str(e))
-        raise ValueError(f"Failed to load landmarks from {landmarks_path}: {e}") from e
+        logger.error("failed_to_load_landmarks", path=path_str, error=str(e))
+        raise ValueError(f"Failed to load landmarks from {path_str}: {e}") from e

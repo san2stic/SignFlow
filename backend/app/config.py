@@ -38,6 +38,16 @@ class Settings(BaseSettings):
     video_dir: str = "/app/data/videos"
     export_dir: str = "/app/data/exports"
 
+    # S3 / MinIO storage (USE_S3_STORAGE=true en production serveur)
+    use_s3_storage: bool = False
+    s3_endpoint_url: str = "http://minio:9000"
+    s3_access_key: str = ""
+    s3_secret_key: str = ""
+    s3_bucket_videos: str = "signflow-videos"
+    s3_bucket_models: str = "signflow-models"
+    s3_presigned_url_expiry: int = Field(default=3600, ge=60, le=86400)
+    s3_region: str = "us-east-1"
+
     trusted_hosts: str = Field(default="localhost,127.0.0.1,testserver")
     enable_docs: bool | None = None
     max_upload_mb: int = Field(default=50, ge=1, le=1024)

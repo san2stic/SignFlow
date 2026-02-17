@@ -1,0 +1,222 @@
+# =============================================================================
+# docker-compose.server.yml — Override serveur GPU local + MinIO + Cloudflare
+# =============================================================================
+#
+# Usage:
+#   source minio-volumes.env
+#   docker compose \
+#     -f docker-compose.yml \
+#     -f docker-compose.prod.yml \
+#     -f docker-compose.server.yml \
+#     --env-file .env.server \
+#     up -d
+#
+# Pré-requis:
+#   1. sudo bash scripts/setup-storage.sh  (génère minio-volumes.env)
+#   2. Créer .env.server avec les secrets (voir .env.server.example)
+#   3. NVIDIA Container Toolkit installé (nvidia-container-toolkit)
+#   4. Token Cloudflare Tunnel configuré dans .env.server
+# =============================================================================
+
+services:
+
+  # ── MinIO S3 Object Storage ───────────────────────────────────────────────
+  minio:
+    image: minio/minio:RELEASE.2024-01-16T16-07-38Z
+    container_name: signflow_minio
+    # MINIO_VOLUMES est généré par setup-storage.sh → source minio-volumes.env
+    command: server ${MINIO_VOLUMES:?Run 'sudo bash scripts/setup-storage.sh' first} --console-address ":9001"
+    restart: unless-stopped
+    environment:
+      - MINIO_ROOT_USER=${MINIO_ROOT_USER:?Set MINIO_ROOT_USER in .env.server}
+      - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD:?Set MINIO_ROOT_PASSWORD in .env.server}
+    ports:
+      # Loopback uniquement : MinIO n'est pas exposé directement (accès via cloudflared → caddy → backend)
+      - "127.0.0.1:9000:9000"   # API S3
+      - "127.0.0.1:9001:9001"   # Console admin MinIO (accès SSH tunnel recommandé)
+    volumes:
+      # ──────────────────────────────────────────────────────────────────────
+      # Bind mounts générés par setup-storage.sh
+      # Décommenter les lignes correspondant à votre MINIO_DISK_COUNT
+      #
+      # 1 disque (MINIO_DISK_COUNT=1) :
+      - /mnt/disk1/minio-data:/mnt/disk1/minio-data
+      #
+      # 2 disques (MINIO_DISK_COUNT=2) — décommenter :
+      # - /mnt/disk2/minio-data:/mnt/disk2/minio-data
+      #
+      # 3 disques (MINIO_DISK_COUNT=3) — décommenter :
+      # - /mnt/disk3/minio-data:/mnt/disk3/minio-data
+      #
+      # 4 disques (MINIO_DISK_COUNT=4, erasure coding) — décommenter :
+      # - /mnt/disk4/minio-data:/mnt/disk4/minio-data
+      #
+      # 5+ disques — continuer le pattern...
+      # ──────────────────────────────────────────────────────────────────────
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    networks:
+      - signflow_network
+
+  # ── MinIO MC : création automatique des buckets (one-shot) ───────────────
+  minio_setup:
+    image: minio/mc:latest
+    container_name: signflow_minio_setup
+    restart: "no"
+    entrypoint: >
+      /bin/sh -c "
+        echo 'Attente de MinIO...' &&
+        until mc alias set myminio http://minio:9000
+          $$MINIO_ROOT_USER $$MINIO_ROOT_PASSWORD --insecure 2>/dev/null; do
+          sleep 3;
+        done &&
+        echo 'MinIO prêt. Création des buckets...' &&
+        mc mb --ignore-existing myminio/$${MINIO_BUCKET_VIDEOS:-signflow-videos} &&
+        mc mb --ignore-existing myminio/$${MINIO_BUCKET_MODELS:-signflow-models} &&
+        echo 'Buckets créés avec succès.' &&
+        mc ls myminio;
+      "
+    environment:
+      - MINIO_ROOT_USER=${MINIO_ROOT_USER:?Set MINIO_ROOT_USER in .env.server}
+      - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD:?Set MINIO_ROOT_PASSWORD in .env.server}
+      - MINIO_BUCKET_VIDEOS=${MINIO_BUCKET_VIDEOS:-signflow-videos}
+      - MINIO_BUCKET_MODELS=${MINIO_BUCKET_MODELS:-signflow-models}
+    depends_on:
+      minio:
+        condition: service_healthy
+    networks:
+      - signflow_network
+
+  # ── Cloudflare Tunnel (accès distant sans ouverture de ports) ────────────
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: signflow_cloudflared
+    restart: unless-stopped
+    # Le token est obtenu depuis : Cloudflare Zero Trust → Networks → Tunnels → Create a tunnel
+    command: tunnel --no-autoupdate run --token ${CLOUDFLARE_TUNNEL_TOKEN:?Get token from Cloudflare Zero Trust dashboard}
+    depends_on:
+      - caddy
+    networks:
+      - signflow_network
+
+  # ── Caddy : restreint loopback (cloudflared interne → caddy:80) ──────────
+  caddy:
+    ports:
+      # Écraser le "80:80" de docker-compose.prod.yml
+      # Caddy n'est accessible que depuis cloudflared (réseau Docker interne)
+      - "127.0.0.1:80:80"
+    volumes:
+      # Utiliser le Caddyfile optimisé pour le mode serveur (sans TLS, Cloudflare gère)
+      - ./Caddyfile.server:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+  # ── TorchServe : GPU NVIDIA CUDA ─────────────────────────────────────────
+  torchserve:
+    platform: linux/amd64
+    runtime: nvidia
+    profiles: []  # Supprimer le profile 'inference' pour l'activer par défaut
+    restart: unless-stopped
+    environment:
+      - TORCH_DEVICE=cuda
+      - TS_NUMBER_OF_GPU=1
+    deploy:
+      resources:
+        limits:
+          memory: 10G
+          cpus: '6.0'
+        reservations:
+          memory: 4G
+          devices:
+            - driver: nvidia
+              capabilities: [gpu]
+              count: 1
+    networks:
+      - signflow_network
+
+  # ── Backend : activation S3 + GPU pour inference Celery ──────────────────
+  backend:
+    volumes:
+      # Remplacer le bind mount ./backend/data:/app/data par des volumes nommés
+      # Les vidéos vont dans MinIO, les modèles/exports restent en volume local
+      - model_data:/app/data/models
+      - export_data:/app/data/exports
+    environment:
+      # Stockage S3 MinIO
+      - USE_S3_STORAGE=true
+      - S3_ENDPOINT_URL=http://minio:9000
+      - S3_ACCESS_KEY=${MINIO_ROOT_USER}
+      - S3_SECRET_KEY=${MINIO_ROOT_PASSWORD}
+      - S3_BUCKET_VIDEOS=${MINIO_BUCKET_VIDEOS:-signflow-videos}
+      - S3_BUCKET_MODELS=${MINIO_BUCKET_MODELS:-signflow-models}
+      - S3_PRESIGNED_URL_EXPIRY=3600
+      - S3_REGION=us-east-1
+      # GPU
+      - TORCH_DEVICE=cuda
+      # TorchServe activé
+      - USE_TORCHSERVE=true
+    depends_on:
+      minio:
+        condition: service_healthy
+      minio_setup:
+        condition: service_completed_successfully
+    networks:
+      - signflow_network
+
+  # ── Celery Worker : accès S3 pour charger les landmarks au training ───────
+  celery_worker:
+    volumes:
+      - model_data:/app/data/models
+    environment:
+      # Stockage S3 MinIO
+      - USE_S3_STORAGE=true
+      - S3_ENDPOINT_URL=http://minio:9000
+      - S3_ACCESS_KEY=${MINIO_ROOT_USER}
+      - S3_SECRET_KEY=${MINIO_ROOT_PASSWORD}
+      - S3_BUCKET_VIDEOS=${MINIO_BUCKET_VIDEOS:-signflow-videos}
+      - S3_BUCKET_MODELS=${MINIO_BUCKET_MODELS:-signflow-models}
+      - S3_PRESIGNED_URL_EXPIRY=3600
+      - S3_REGION=us-east-1
+      # GPU pour training
+      - TORCH_DEVICE=cuda
+    depends_on:
+      minio:
+        condition: service_healthy
+    networks:
+      - signflow_network
+
+  # ── MLflow : artifacts S3 MinIO + backend PostgreSQL ────────────────────
+  mlflow:
+    # Écraser la commande de docker-compose.prod.yml pour activer S3 artifacts
+    command: >
+      sh -c "pip install --quiet mlflow>=2.10.0 psycopg2-binary boto3 &&
+             mlflow server
+               --host 0.0.0.0
+               --port 5001
+               --backend-store-uri postgresql+psycopg2://${POSTGRES_USER:-signflow}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-signflow_mlflow}
+               --default-artifact-root s3://${MINIO_BUCKET_MODELS:-signflow-models}/mlruns
+               --serve-artifacts"
+    ports:
+      # Loopback uniquement (accès via SSH tunnel pour l'admin)
+      - "127.0.0.1:5001:5001"
+    volumes: []  # Supprimer le bind mount mlruns (remplacé par MinIO S3)
+    environment:
+      - MLFLOW_S3_ENDPOINT_URL=http://minio:9000
+      - AWS_ACCESS_KEY_ID=${MINIO_ROOT_USER}
+      - AWS_SECRET_ACCESS_KEY=${MINIO_ROOT_PASSWORD}
+    depends_on:
+      - db
+      - minio
+    networks:
+      - signflow_network
+
+# ── Volumes supplémentaires ───────────────────────────────────────────────────
+volumes:
+  model_data:
+    driver: local
+  export_data:
+    driver: local

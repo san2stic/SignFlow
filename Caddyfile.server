@@ -1,0 +1,65 @@
+# =============================================================================
+# Caddyfile.server — Configuration Caddy pour déploiement serveur GPU
+# =============================================================================
+#
+# Cloudflare Tunnel gère TLS/HTTPS en amont.
+# Caddy écoute en HTTP sur :80 uniquement (accès interne via cloudflared).
+# Pas de directive tls : Caddy ne gère pas les certificats.
+#
+# Architecture :
+#   Internet → Cloudflare (TLS) → cloudflared → caddy:80 → services Docker
+# =============================================================================
+
+:80 {
+    # ── Compression ──────────────────────────────────────────────────────────
+    encode zstd gzip
+
+    # ── Security Headers ─────────────────────────────────────────────────────
+    header {
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "DENY"
+        Referrer-Policy "strict-origin-when-cross-origin"
+        Permissions-Policy "camera=(self), microphone=(), geolocation=()"
+        # Supprimer l'en-tête Server pour ne pas exposer Caddy
+        -Server
+    }
+
+    # ── WebSocket : traduction en temps réel (prioritaire) ───────────────────
+    # Doit être défini avant le matcher @backend pour prendre priorité
+    @ws {
+        path /api/v1/translate/stream
+        header Connection *Upgrade*
+        header Upgrade websocket
+    }
+    reverse_proxy @ws backend:8000 {
+        transport http {
+            dial_timeout 5s
+            read_timeout 0  # Pas de timeout pour les WebSockets
+        }
+    }
+
+    # ── API Backend ──────────────────────────────────────────────────────────
+    @backend path /api/* /healthz /metrics /docs /redoc /openapi.json
+    reverse_proxy @backend backend:8000 {
+        transport http {
+            dial_timeout 5s
+            # Timeout long pour les uploads vidéo (50MB max = plusieurs secondes)
+            response_header_timeout 120s
+            read_timeout 180s
+        }
+    }
+
+    # ── Frontend React (SPA — catch-all) ─────────────────────────────────────
+    reverse_proxy frontend:8080 {
+        transport http {
+            dial_timeout 5s
+        }
+    }
+
+    # ── Logging ──────────────────────────────────────────────────────────────
+    log {
+        output stdout
+        format json
+        level INFO
+    }
+}

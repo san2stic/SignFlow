@@ -6,7 +6,7 @@ import structlog
 from pathlib import Path
 from sklearn.metrics.pairwise import cosine_similarity
 
-from app.ml.dataset import temporal_resample
+from app.ml.dataset import load_landmarks_from_file, temporal_resample
 from app.ml.feature_engineering import compute_enriched_features
 
 logger = structlog.get_logger(__name__)
@@ -33,9 +33,9 @@ def compute_video_similarity(
     Returns:
         float: Similarity score 0.0-1.0 (1.0 = identical)
     """
-    # Load landmarks
-    landmarks_a = np.load(landmarks_path_a)
-    landmarks_b = np.load(landmarks_path_b)
+    # Load landmarks (supporte chemin local et clé S3)
+    landmarks_a = load_landmarks_from_file(landmarks_path_a)
+    landmarks_b = load_landmarks_from_file(landmarks_path_b)
 
     # Temporal normalization
     seq_a = temporal_resample(landmarks_a, target_len=64)

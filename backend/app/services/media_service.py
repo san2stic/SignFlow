@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import io
 import os
+import shutil
+import tempfile
 import uuid
 from pathlib import Path
 
@@ -136,13 +139,56 @@ class MediaService:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
         extension = Path(filename).suffix.lower() or ".mp4"
+        file_id = str(uuid.uuid4())
+        max_bytes = settings.max_upload_mb * 1024 * 1024
+
+        if settings.use_s3_storage:
+            return self._add_video_s3(
+                db=db,
+                sign=sign,
+                sign_id=sign_id,
+                upload=upload,
+                video_type=video_type,
+                metadata=metadata,
+                settings=settings,
+                file_id=file_id,
+                extension=extension,
+                max_bytes=max_bytes,
+            )
+
+        return self._add_video_local(
+            db=db,
+            sign=sign,
+            sign_id=sign_id,
+            upload=upload,
+            video_type=video_type,
+            metadata=metadata,
+            settings=settings,
+            file_id=file_id,
+            extension=extension,
+            max_bytes=max_bytes,
+        )
+
+    def _add_video_local(
+        self,
+        *,
+        db: Session,
+        sign,
+        sign_id: str,
+        upload: UploadFile,
+        video_type: str,
+        metadata: VideoCreateMetadata,
+        settings: Settings,
+        file_id: str,
+        extension: str,
+        max_bytes: int,
+    ) -> VideoSchema:
+        """Upload vidéo vers le filesystem local (mode développement)."""
         folder = os.path.join(settings.video_dir, video_type)
         os.makedirs(folder, exist_ok=True)
 
-        file_id = str(uuid.uuid4())
         raw_path = os.path.join(folder, f"{file_id}_raw{extension}")
         final_path = os.path.join(folder, f"{file_id}.mp4")
-        max_bytes = settings.max_upload_mb * 1024 * 1024
         written_bytes = 0
         chunk_size = 1024 * 1024
 
@@ -175,7 +221,6 @@ class MediaService:
         except Exception:
             final_path = raw_path
 
-        # Initialize video record
         video = Video(
             sign_id=sign_id,
             file_path=final_path,
@@ -200,23 +245,20 @@ class MediaService:
         db.commit()
         db.refresh(video)
 
-        # Extract landmarks asynchronously after initial commit
         try:
             logger.info("starting_landmark_extraction", video_id=str(video.id), file_path=final_path)
             result = extract_landmarks_from_video(
                 video_path=final_path,
-                include_face=False,  # Exclude face for performance
+                include_face=False,
                 include_face_expressions=True,
                 min_detection_confidence=0.7,
                 min_tracking_confidence=0.7,
             )
 
-            # Save landmarks to .npy file
             landmarks_filename = f"{file_id}_landmarks.npy"
             landmarks_path = os.path.join(folder, landmarks_filename)
             np.save(landmarks_path, result.landmarks)
 
-            # Update video record with landmarks metadata
             video.landmarks_extracted = True
             video.landmarks_path = landmarks_path
             video.detection_rate = float(result.detection_rate)
@@ -252,8 +294,145 @@ class MediaService:
                 error=str(e),
                 exc_info=True,
             )
-            # Don't fail the upload if landmark extraction fails
-            # The video is still saved, landmarks can be extracted later
+
+        db.refresh(video)
+        return self._to_schema(video)
+
+    def _add_video_s3(
+        self,
+        *,
+        db: Session,
+        sign,
+        sign_id: str,
+        upload: UploadFile,
+        video_type: str,
+        metadata: VideoCreateMetadata,
+        settings: Settings,
+        file_id: str,
+        extension: str,
+        max_bytes: int,
+    ) -> VideoSchema:
+        """Upload vidéo vers MinIO/S3 (mode production serveur)."""
+        from app.storage.factory import get_storage
+
+        storage = get_storage()
+        tmp_dir = Path(tempfile.mkdtemp(prefix="signflow_upload_"))
+
+        try:
+            raw_path = tmp_dir / f"{file_id}_raw{extension}"
+            final_path = tmp_dir / f"{file_id}.mp4"
+            written_bytes = 0
+            chunk_size = 1024 * 1024
+
+            try:
+                with open(raw_path, "wb") as file_obj:
+                    while True:
+                        chunk = upload.file.read(chunk_size)
+                        if not chunk:
+                            break
+                        written_bytes += len(chunk)
+                        if written_bytes > max_bytes:
+                            raise HTTPException(
+                                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                                detail="File too large",
+                            )
+                        file_obj.write(chunk)
+            except HTTPException:
+                raise
+
+            if written_bytes == 0:
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Uploaded file is empty")
+
+            try:
+                compress_video(str(raw_path), str(final_path))
+                raw_path.unlink(missing_ok=True)
+            except Exception:
+                final_path = raw_path
+
+            # Clé S3 (stockée en DB à la place du chemin local)
+            s3_key = f"videos/{video_type}/{file_id}.mp4"
+            storage.upload_file(final_path, s3_key, settings.s3_bucket_videos)
+            logger.info("s3_video_uploaded", key=s3_key, bucket=settings.s3_bucket_videos)
+
+            video = Video(
+                sign_id=sign_id,
+                file_path=s3_key,  # Clé S3, pas un chemin local
+                thumbnail_path=None,
+                duration_ms=metadata.duration_ms,
+                fps=metadata.fps,
+                resolution=metadata.resolution,
+                type=video_type,
+                landmarks_extracted=False,
+                landmarks_path=None,
+                detection_rate=0.0,
+                quality_score=0.0,
+                is_trainable=False,
+                landmark_feature_dim=225,
+            )
+            db.add(video)
+
+            sign.video_count += 1
+            if video_type == "training":
+                sign.training_sample_count += 1
+
+            db.commit()
+            db.refresh(video)
+
+            # Extraction landmarks sur fichier local temporaire
+            try:
+                logger.info("starting_landmark_extraction", video_id=str(video.id), s3_key=s3_key)
+                result = extract_landmarks_from_video(
+                    video_path=str(final_path),
+                    include_face=False,
+                    include_face_expressions=True,
+                    min_detection_confidence=0.7,
+                    min_tracking_confidence=0.7,
+                )
+
+                # Upload landmarks vers S3
+                buf = io.BytesIO()
+                np.save(buf, result.landmarks)
+                lm_key = f"videos/{video_type}/{file_id}_landmarks.npy"
+                storage.upload_bytes(buf.getvalue(), lm_key, settings.s3_bucket_videos, "application/octet-stream")
+
+                video.landmarks_extracted = True
+                video.landmarks_path = lm_key  # Clé S3
+                video.detection_rate = float(result.detection_rate)
+                video.landmark_feature_dim = int(result.landmarks.shape[1])
+                quality_score, candidate_trainable = self._estimate_quality_score(
+                    result.landmarks,
+                    detection_rate=result.detection_rate,
+                )
+                video.quality_score = quality_score
+                video.is_trainable = bool(candidate_trainable)
+                db.commit()
+
+                logger.info(
+                    "landmark_extraction_complete",
+                    video_id=str(video.id),
+                    detection_rate=result.detection_rate,
+                    num_frames=result.num_frames,
+                    landmarks_shape=result.landmarks.shape,
+                )
+
+                if result.detection_rate < 0.8:
+                    logger.warning(
+                        "low_detection_rate_warning",
+                        video_id=str(video.id),
+                        detection_rate=result.detection_rate,
+                        message="Less than 80% of frames have landmarks detected",
+                    )
+
+            except Exception as e:
+                logger.error(
+                    "landmark_extraction_failed",
+                    video_id=str(video.id),
+                    error=str(e),
+                    exc_info=True,
+                )
+
+        finally:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
 
         db.refresh(video)
         return self._to_schema(video)
@@ -276,7 +455,9 @@ class MediaService:
         return payload
 
     def delete_video(self, db: Session, video_id: str) -> bool:
-        """Delete a video record and local file if present."""
+        """Delete a video record and associated storage (local or S3)."""
+        from app.config import get_settings
+
         video = db.get(Video, video_id)
         if not video:
             return False
@@ -287,14 +468,51 @@ class MediaService:
             if video.type == "training":
                 sign.training_sample_count = max(0, sign.training_sample_count - 1)
 
-        if os.path.exists(video.file_path):
-            os.remove(video.file_path)
+        settings = get_settings()
+        if settings.use_s3_storage:
+            from app.storage.factory import get_storage
+            storage = get_storage()
+            storage.delete_object(video.file_path, settings.s3_bucket_videos)
+            if video.landmarks_path:
+                storage.delete_object(video.landmarks_path, settings.s3_bucket_videos)
+        else:
+            if video.file_path and os.path.exists(video.file_path):
+                os.remove(video.file_path)
+            if video.landmarks_path and os.path.exists(video.landmarks_path):
+                os.remove(video.landmarks_path)
 
         db.delete(video)
         db.commit()
         return True
 
     def get_video_path(self, db: Session, video_id: str) -> str | None:
-        """Return underlying file path for streaming."""
+        """Return local file path for streaming (mode dev uniquement).
+
+        En mode S3, retourne None — utiliser get_video_url() à la place.
+        """
+        from app.config import get_settings
+        settings = get_settings()
+        if settings.use_s3_storage:
+            return None
         video = db.get(Video, video_id)
         return video.file_path if video else None
+
+    def get_video_url(self, db: Session, video_id: str) -> str | None:
+        """Return a URL for video streaming.
+
+        - Mode S3 : presigned URL MinIO (accès direct, expirée après s3_presigned_url_expiry secondes)
+        - Mode local : URL API interne /api/v1/media/{video_id}/stream
+        """
+        from app.config import get_settings
+        settings = get_settings()
+        video = db.get(Video, video_id)
+        if not video:
+            return None
+        if settings.use_s3_storage:
+            from app.storage.factory import get_storage
+            return get_storage().get_presigned_url(
+                video.file_path,
+                settings.s3_bucket_videos,
+                expiry=settings.s3_presigned_url_expiry,
+            )
+        return self._public_video_path(video_id)
