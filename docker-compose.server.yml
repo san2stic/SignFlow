@@ -75,7 +75,7 @@ services:
       - MINIO_BUCKET_MODELS=${MINIO_BUCKET_MODELS:-signflow-models}
     depends_on:
       minio:
-        condition: service_healthy
+        condition: service_started
     networks:
       - signflow_network
 
@@ -149,9 +149,9 @@ services:
       - USE_TORCHSERVE=true
     depends_on:
       minio:
-        condition: service_healthy
+        condition: service_started
       minio_setup:
-        condition: service_completed_successfully
+        condition: service_started
     networks:
       - signflow_network
 
@@ -173,7 +173,7 @@ services:
       - TORCH_DEVICE=cuda
     depends_on:
       minio:
-        condition: service_healthy
+        condition: service_started
     networks:
       - signflow_network
 
