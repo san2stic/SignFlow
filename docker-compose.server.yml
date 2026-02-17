@@ -91,12 +91,9 @@ services:
     networks:
       - signflow_network
 
-  # ── Caddy : restreint loopback (cloudflared interne → caddy:80) ──────────
+  # ── Caddy : pas de port hôte (cloudflared accède via réseau Docker interne) ──
   caddy:
-    ports:
-      # Écraser le "80:80" de docker-compose.prod.yml
-      # Caddy n'est accessible que depuis cloudflared (réseau Docker interne)
-      - "127.0.0.1:80:80"
+    ports: !reset []
     volumes:
       # Utiliser le Caddyfile optimisé pour le mode serveur (sans TLS, Cloudflare gère)
       - ./Caddyfile.server:/etc/caddy/Caddyfile:ro
