@@ -2,13 +2,13 @@
 # docker-compose.server.yml — Override serveur GPU local + MinIO + Cloudflare
 # =============================================================================
 #
-# Usage:
-#   source minio-volumes.env
+# Usage (IMPORTANT : passer les DEUX fichiers env) :
 #   docker compose \
 #     -f docker-compose.yml \
 #     -f docker-compose.prod.yml \
 #     -f docker-compose.server.yml \
 #     --env-file .env.server \
+#     --env-file minio-volumes.env \
 #     up -d
 #
 # Pré-requis:
@@ -24,8 +24,8 @@ services:
   minio:
     image: minio/minio:RELEASE.2024-01-16T16-07-38Z
     container_name: signflow_minio
-    # MINIO_VOLUMES est généré par setup-storage.sh → source minio-volumes.env
-    command: server ${MINIO_VOLUMES:?Run 'sudo bash scripts/setup-storage.sh' first} --console-address ":9001"
+    # MINIO_VOLUMES est lu depuis minio-volumes.env via --env-file minio-volumes.env
+    command: server ${MINIO_VOLUMES} --console-address ":9001"
     restart: unless-stopped
     environment:
       - MINIO_ROOT_USER=${MINIO_ROOT_USER:?Set MINIO_ROOT_USER in .env.server}
