@@ -6,7 +6,10 @@ import ProtectedRoute from "./components/ProtectedRoute";
 import Login from "./pages/Login";
 import Register from "./pages/Register";
 
-const Dashboard = lazy(() => import("./pages/Dashboard"));
+const DashboardPage = lazy(async () => {
+  const module = await import("./pages/DashboardPage");
+  return { default: module.DashboardPage };
+});
 const TranslatePage = lazy(async () => {
   const module = await import("./pages/TranslatePage");
   return { default: module.TranslatePage };
@@ -28,6 +31,19 @@ const SettingsPage = lazy(async () => {
   return { default: module.SettingsPage };
 });
 const Profile = lazy(() => import("./pages/Profile"));
+
+const StudioPage = lazy(async () => {
+  const module = await import("./pages/StudioPage");
+  return { default: module.StudioPage };
+});
+const StudioSessionPage = lazy(async () => {
+  const module = await import("./pages/StudioSessionPage");
+  return { default: module.StudioSessionPage };
+});
+const VideoAnnotationPage = lazy(async () => {
+  const module = await import("./pages/VideoAnnotationPage");
+  return { default: module.VideoAnnotationPage };
+});
 
 function RouteFallback(): JSX.Element {
   return (
@@ -81,7 +97,7 @@ export const router = createBrowserRouter([
     errorElement: <RouteErrorBoundary />,
     children: [
       { index: true, element: <Navigate to="/dashboard" replace /> },
-      { path: "dashboard", element: withSuspense(<Dashboard />) },
+      { path: "dashboard", element: withSuspense(<DashboardPage />) },
       { path: "translate", element: withSuspense(<TranslatePage />) },
       { path: "dictionary", element: withSuspense(<DictionaryPage />) },
       { path: "training", element: withSuspense(<TrainPage />) },
@@ -89,6 +105,13 @@ export const router = createBrowserRouter([
       { path: "train", element: withSuspense(<TrainPage />) },
       { path: "settings", element: withSuspense(<SettingsPage />) },
       { path: "profile", element: withSuspense(<Profile />) },
+      // Studio routes
+      { path: "studio", element: withSuspense(<StudioPage />) },
+      { path: "studio/sessions/:sessionId", element: withSuspense(<StudioSessionPage />) },
+      {
+        path: "studio/sessions/:sessionId/videos/:videoId/annotate",
+        element: withSuspense(<VideoAnnotationPage />),
+      },
       { path: "*", element: <Navigate to="/dashboard" replace /> },
     ],
   },

@@ -1,4 +1,12 @@
-"""Landmark feature extraction and normalization helpers."""
+"""Landmark feature extraction and normalization helpers.
+
+V1 pipeline: ENRICHED_FEATURE_DIM = 493 (backward compatible)
+V2 pipeline: ENRICHED_FEATURE_DIM_V2 = 611 — adds handshape (84), NMM (32),
+             signing space (18), minus 16 redundant V1 hand-shape features.
+
+Use ``extract_features_v2()`` or ``normalize_landmarks_v2()`` for the new pipeline.
+Pass ``version=2`` to ``extract_features()`` for router-level dispatch.
+"""
 
 from __future__ import annotations
 
@@ -8,7 +16,17 @@ from pathlib import Path
 import numpy as np
 import structlog
 
-from app.ml.feature_engineering import FACIAL_EXPRESSION_FEATURE_DIM
+from app.ml.feature_engineering import (
+    ENRICHED_FEATURE_DIM,
+    FACIAL_EXPRESSION_FEATURE_DIM,
+    HAND_SHAPE_FEATURE_DIM,
+)
+from app.ml.handshape_features import (
+    HANDSHAPE_FEATURE_DIM,
+    extract_both_hands_handshape,
+)
+from app.ml.facial_action_units import NMM_FEATURE_DIM, extract_nmm_features
+from app.ml.signing_space import SIGNING_SPACE_FEATURE_DIM, extract_signing_space
 
 logger = structlog.get_logger(__name__)
 
@@ -427,4 +445,218 @@ def extract_landmarks_from_video(
         num_frames=frame_count,
         detection_rate=detection_rate,
         duration_sec=duration_sec,
+    )
+
+
+# ── V2 feature pipeline ───────────────────────────────────────────────────────
+
+# V2 layout (explicit, matches normalize_landmarks_v2 output):
+#   coord_block     (left_hand xyz + right_hand xyz + pose xyz) = 63+63+99 = 225
+#   facial_expr     compact expression features                  =  12
+#   coord_vel       frame velocities of coordinate block         = 225
+#   inter_dist      5 inter-hand distances                       =   5
+#   joint_angles    4 arm joint angles                           =   4
+#   facial_vel      6 facial velocity dims (reduced from 12)     =   6
+#   ── NEW ──
+#   handshape       2 × 42 per-hand handshape features           =  84
+#   NMM             facial action units + head pose + gaze        =  32
+#   signing_space   spatial signing space features               =  18
+# ─────────────────────────────────────────────────────────────────────────────
+#   TOTAL                                                        = 611
+
+_V2_BASE_DIM = (
+    225          # coord_block (left 63 + right 63 + pose 99)
+    + 12         # facial_expr
+    + 225        # coord_vel
+    + 5          # inter_dist
+    + 4          # joint_angles
+    + 6          # facial_vel (6 channels)
+)  # = 477
+
+ENRICHED_FEATURE_DIM_V2: int = (
+    _V2_BASE_DIM                        # 477 — V2 base (no hand_shape, partial facial_vel)
+    + 2 * HANDSHAPE_FEATURE_DIM         # +84 — rich per-hand handshape (2 × 42)
+    + NMM_FEATURE_DIM                   # +32 — NMM / facial AUs
+    + SIGNING_SPACE_FEATURE_DIM         # +18 — signing space
+)
+# = 477 + 84 + 32 + 18 = 611
+
+
+def normalize_landmarks_v2(
+    frame: FrameLandmarks,
+    *,
+    include_handshape: bool = True,
+    include_nmm: bool = True,
+    include_signing_space: bool = True,
+    prev_right_wrist: np.ndarray | None = None,
+    prev_left_wrist: np.ndarray | None = None,
+) -> np.ndarray:
+    """Normalize landmarks and return V2 feature vector for one frame.
+
+    V2 layout (611 dims by default):
+      [0:63]    left-hand xyz (normalized)
+      [63:126]  right-hand xyz (normalized)
+      [126:225] pose xyz (normalized)
+      [225:237] compact facial expression (12 dims)
+      [237:462] coordinate velocities (225 dims)
+      [462:467] inter-hand distances (5 dims)
+      [467:471] joint angles (4 dims)
+      — V1 hand_shape removed (10 dims) —
+      [471:477] facial expression velocity (6 dims — first 6 of 12 velocity channels)
+      [477:561] handshape features 84 dims (if include_handshape)
+      [561:593] NMM features 32 dims (if include_nmm)
+      [593:611] signing space features 18 dims (if include_signing_space)
+
+    Args:
+        frame: FrameLandmarks with left_hand, right_hand, pose, face.
+        include_handshape: Whether to append handshape features (84 dims).
+        include_nmm: Whether to append NMM/AU features (32 dims). Requires face data.
+        include_signing_space: Whether to append signing space features (18 dims).
+        prev_right_wrist: Previous right wrist for motion (optional).
+        prev_left_wrist: Previous left wrist for motion (optional).
+
+    Returns:
+        Array of shape (611,) dtype float32 when all modules enabled.
+    """
+    # ── V1 base (stripped of hand_shape and reduced facial_velocity) ── #
+    pose_raw = _flatten(frame.pose, 33)
+    hip_left = np.array(pose_raw[23 * 3 : 23 * 3 + 3]) if len(pose_raw) >= 75 else np.zeros(3)
+    hip_right = np.array(pose_raw[24 * 3 : 24 * 3 + 3]) if len(pose_raw) >= 78 else np.zeros(3)
+    hip_center = (hip_left + hip_right) / 2.0
+
+    left_np = np.array(_flatten(frame.left_hand, 21), dtype=np.float32).reshape(-1, 3)
+    right_np = np.array(_flatten(frame.right_hand, 21), dtype=np.float32).reshape(-1, 3)
+    pose_vec = np.array(pose_raw, dtype=np.float32).reshape(-1, 3)
+    body_scale = _resolve_body_scale(pose_vec)
+
+    left_norm = ((left_np - hip_center) / body_scale).reshape(-1)
+    right_norm = ((right_np - hip_center) / body_scale).reshape(-1)
+    pose_norm = ((pose_vec - hip_center) / body_scale).reshape(-1)
+
+    facial_expr = _compute_facial_expression_features(
+        frame.face, hip_center=hip_center, body_scale=body_scale
+    )  # (12,)
+
+    # Velocities (225 dims using coordinate block only)
+    coord_block = np.concatenate([left_norm, right_norm, pose_norm])  # (225,)
+    # We approximate per-frame velocity as zeros here; multi-frame is handled by
+    # compute_enriched_features in feature_engineering.py for training sequences.
+    coord_vel = np.zeros_like(coord_block)  # (225,) for single-frame inference
+
+    # Distances (5 dims)
+    l_wrist_pt = left_np[0] if left_np.shape[0] > 0 else np.zeros(3)
+    r_wrist_pt = right_np[0] if right_np.shape[0] > 0 else np.zeros(3)
+    l_tips = left_np[[4, 8, 12, 20]] if left_np.shape[0] >= 21 else np.zeros((4, 3))
+    r_tips = right_np[[4, 8, 12, 20]] if right_np.shape[0] >= 21 else np.zeros((4, 3))
+    inter_dist = np.zeros(5, dtype=np.float32)
+    inter_dist[0] = float(np.linalg.norm(l_wrist_pt - r_wrist_pt)) / max(body_scale, 1e-6)
+    for i in range(4):
+        inter_dist[i + 1] = float(np.linalg.norm(l_tips[i] - r_tips[i])) / max(body_scale, 1e-6)
+
+    # Joint angles (4 dims) — elbow + wrist
+    def _angle_vec(a: np.ndarray, b: np.ndarray, c: np.ndarray) -> float:
+        ba, bc = a - b, c - b
+        n_ba, n_bc = float(np.linalg.norm(ba)), float(np.linalg.norm(bc))
+        if n_ba < 1e-8 or n_bc < 1e-8:
+            return 0.0
+        return float(np.arccos(np.clip(float(np.dot(ba, bc) / (n_ba * n_bc)), -1.0, 1.0)))
+
+    jnt = np.zeros(4, dtype=np.float32)
+    if pose_vec.shape[0] >= 17:
+        jnt[0] = _angle_vec(pose_vec[11], pose_vec[13], pose_vec[15])  # L elbow
+        jnt[1] = _angle_vec(pose_vec[12], pose_vec[14], pose_vec[16])  # R elbow
+    if pose_vec.shape[0] >= 17 and left_np.shape[0] >= 13:
+        jnt[2] = _angle_vec(pose_vec[13], left_np[0], left_np[12])   # L wrist
+    if pose_vec.shape[0] >= 17 and right_np.shape[0] >= 13:
+        jnt[3] = _angle_vec(pose_vec[14], right_np[0], right_np[12]) # R wrist
+
+    # Facial velocity (first 6 channels only, reduced from 12 in V1)
+    facial_vel = np.zeros(6, dtype=np.float32)  # per-frame = 0; meaningful over time
+
+    # Base V2 vector (471 dims)
+    v2_base = np.concatenate([
+        coord_block,   # 225
+        facial_expr,   # 12
+        coord_vel,     # 225
+        inter_dist,    # 5
+        jnt,           # 4
+        facial_vel,    # 6
+    ])  # = 477
+
+    chunks = [v2_base]
+
+    # ── Handshape (84 dims) ──────────────────────────────────────────────────
+    if include_handshape:
+        # Use normalized (body-centered) hand landmarks for handshape
+        left_hs = left_norm.reshape(21, 3) if left_norm.shape[0] >= 63 else np.zeros((21, 3))
+        right_hs = right_norm.reshape(21, 3) if right_norm.shape[0] >= 63 else np.zeros((21, 3))
+        hs_feats = extract_both_hands_handshape(left_hs, right_hs)  # (84,)
+        chunks.append(hs_feats)
+
+    # ── NMM (32 dims) ─────────────────────────────────────────────────────────
+    if include_nmm:
+        face_pts = frame.face or []
+        if face_pts:
+            face_arr = np.array(_flatten(face_pts, 468), dtype=np.float32).reshape(-1, 3)
+        else:
+            face_arr = np.zeros((468, 3), dtype=np.float32)
+        nmm_feats = extract_nmm_features(face_arr)  # (32,)
+        chunks.append(nmm_feats)
+
+    # ── Signing space (18 dims) ───────────────────────────────────────────────
+    if include_signing_space:
+        left_raw = left_np  # raw (before normalization) for signed-space computation
+        right_raw = right_np
+        space_feats = extract_signing_space(
+            left_hand=left_raw,
+            right_hand=right_raw,
+            pose_landmarks=pose_vec,
+            prev_right_wrist=prev_right_wrist,
+            prev_left_wrist=prev_left_wrist,
+        )  # (18,)
+        chunks.append(space_feats)
+
+    result = np.concatenate(chunks).astype(np.float32)
+    result = np.nan_to_num(result, nan=0.0, posinf=0.0, neginf=0.0)
+    return np.clip(result, -5.0, 5.0)
+
+
+def extract_features_v2(
+    landmarks_data: dict,
+    *,
+    include_handshape: bool = True,
+    include_nmm: bool = True,
+    include_signing_space: bool = True,
+    prev_right_wrist: np.ndarray | None = None,
+    prev_left_wrist: np.ndarray | None = None,
+) -> np.ndarray:
+    """Extract V2 feature vector from a landmarks payload dict.
+
+    Convenience wrapper for use in the inference pipeline; accepts
+    the same dict format as ``process_frame()`` in the pipeline.
+
+    Args:
+        landmarks_data: Dict with keys ``hands`` (left/right), ``pose``, ``face``.
+        include_handshape: Enable rich handshape features (84 dims).
+        include_nmm: Enable NMM / facial AU features (32 dims, requires face).
+        include_signing_space: Enable spatial signing features (18 dims).
+        prev_right_wrist: Previous right wrist xyz for motion estimation.
+        prev_left_wrist: Previous left wrist xyz for motion estimation.
+
+    Returns:
+        Feature vector of shape (ENRICHED_FEATURE_DIM_V2,) = (611,) when all enabled.
+    """
+    frame = FrameLandmarks(
+        left_hand=landmarks_data.get("hands", {}).get("left", []) or [],
+        right_hand=landmarks_data.get("hands", {}).get("right", []) or [],
+        pose=landmarks_data.get("pose", []) or [],
+        face=landmarks_data.get("face", []) or [],
+    )
+    return normalize_landmarks_v2(
+        frame,
+        include_handshape=include_handshape,
+        include_nmm=include_nmm,
+        include_signing_space=include_signing_space,
+        prev_right_wrist=prev_right_wrist,
+        prev_left_wrist=prev_left_wrist,
     )

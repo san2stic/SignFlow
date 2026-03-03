@@ -6,6 +6,8 @@ import { listSigns, type Sign } from "../api/signs";
 import { CameraFeed } from "../components/camera/CameraFeed";
 import { LandmarkOverlay } from "../components/camera/LandmarkOverlay";
 import { ConfidenceBadge } from "../components/common/ConfidenceBadge";
+import { ConversationPanel } from "../components/translate/ConversationPanel";
+import { SignConfidenceBar } from "../components/translate/SignConfidenceBar";
 import { useCamera } from "../hooks/useCamera";
 import { useMediaPipe } from "../hooks/useMediaPipe";
 import { useWebSocket } from "../hooks/useWebSocket";
@@ -22,6 +24,31 @@ interface StreamPayload {
   alternatives: Array<{ sign: string; confidence: number }>;
   sentence_buffer: string;
   is_sentence_complete: boolean;
+  // Phase 5 — Conversation
+  type?: string;
+  translated_sentence?: string;
+  grammar_tags?: string[];
+  translation_mode?: string;
+  turn_id?: number | null;
+  is_new_turn?: boolean;
+  conversation_context?: {
+    turn_count: number;
+    last_turns: Array<{ id: number; text: string; time: number; confidence: number }>;
+    spatial_referents: Record<string, string>;
+    current_subjects: string[];
+    session_age_seconds: number;
+  };
+  // Typed sub-messages
+  sentence?: string;
+  raw_signs?: string[];
+  // Context messages
+  context?: {
+    turn_count: number;
+    last_turns: Array<{ id: number; text: string; time: number; confidence: number }>;
+    spatial_referents: Record<string, string>;
+    current_subjects: string[];
+    session_age_seconds: number;
+  };
 }
 
 type UnknownPromptMode = "decision" | "assign";
@@ -67,6 +94,17 @@ export function TranslatePage(): JSX.Element {
   const setLive = useTranslateStore((state) => state.setLive);
   const reset = useTranslateStore((state) => state.reset);
 
+  // Phase 5 — Conversation
+  const conversationHistory = useTranslateStore((state) => state.conversationHistory);
+  const translatedSentence = useTranslateStore((state) => state.translatedSentence);
+  const translationMode = useTranslateStore((state) => state.translationMode);
+  const buildingBuffer = useTranslateStore((state) => state.buildingBuffer);
+  const handleSentenceComplete = useTranslateStore((state) => state.handleSentenceComplete);
+  const setNewTurn = useTranslateStore((state) => state.setNewTurn);
+  const setConversationContext = useTranslateStore((state) => state.setConversationContext);
+  const resetConversation = useTranslateStore((state) => state.resetConversation);
+  const setGrammarMode = useTranslateStore((state) => state.setGrammarMode);
+
   const setPendingClip = useTrainingStore((state) => state.setPendingClip);
 
   const [showUnknownPrompt, setShowUnknownPrompt] = useState(false);
@@ -110,6 +148,56 @@ export function TranslatePage(): JSX.Element {
   const ws = useWebSocket<LandmarkFrame, StreamPayload>({
     path: "/translate/stream",
     onMessage: (payload) => {
+      // ---------------------------------------------------------------
+      // Phase 5 — Gérer les messages typés (sentence_complete, new_turn…)
+      // ---------------------------------------------------------------
+      if (payload.type === "sentence_complete") {
+        handleSentenceComplete({
+          sentence: payload.sentence ?? payload.sentence_buffer ?? "",
+          translated_sentence: payload.translated_sentence ?? payload.sentence ?? "",
+          grammar_tags: payload.grammar_tags ?? [],
+          confidence: payload.confidence,
+          raw_signs: payload.raw_signs ?? (payload.sentence_buffer ?? "").split(" ").filter(Boolean),
+          translation_mode: payload.translation_mode ?? "rules",
+          turn_id: payload.turn_id ?? null,
+        });
+        if (speakOnDetect && payload.translated_sentence) {
+          speak(payload.translated_sentence);
+        }
+        return;
+      }
+
+      if (payload.type === "new_turn" && payload.turn_id != null) {
+        setNewTurn(payload.turn_id);
+        return;
+      }
+
+      if (payload.type === "conversation_update" && payload.context) {
+        setConversationContext({
+          turn_count: payload.context.turn_count,
+          last_turns: payload.context.last_turns,
+          spatial_referents: payload.context.spatial_referents,
+          current_subjects: payload.context.current_subjects ?? [],
+          session_age_seconds: payload.context.session_age_seconds,
+        });
+        return;
+      }
+
+      if (payload.type === "conversation_reset" || payload.type === "grammar_mode_set") {
+        if (payload.type === "grammar_mode_set" && (payload as { mode?: string }).mode) {
+          setGrammarMode((payload as { mode?: string }).mode ?? "rules");
+        }
+        return;
+      }
+
+      // ---------------------------------------------------------------
+      // Traitement normal d'une frame (rétrocompatibilité)
+      // ---------------------------------------------------------------
+      if (!payload.prediction && payload.type) {
+        // Message typed sans prediction → ignorer
+        return;
+      }
+
       setLive({
         prediction: payload.prediction,
         confidence: payload.confidence,
@@ -515,6 +603,12 @@ export function TranslatePage(): JSX.Element {
                 {displayedPrediction}
               </span>
             </motion.p>
+            {/* Barre de confiance temps réel */}
+            <SignConfidenceBar
+              confidence={displayedConfidence}
+              showLabel
+              className="mt-3 max-w-xs"
+            />
           </div>
           <div className="w-48">
             <ConfidenceBadge confidence={displayedConfidence} />
@@ -522,14 +616,29 @@ export function TranslatePage(): JSX.Element {
         </div>
       </motion.div>
 
-      {/* Sentence buffer */}
+      {/* Phrase traduite (grammaire LSFB) + Sentence buffer brut */}
       <motion.div
         initial={{ opacity: 0, y: 20 }}
         animate={{ opacity: 1, y: 0 }}
         transition={{ delay: 0.25 }}
         className="card p-6"
       >
-        <p className="mb-3 text-xs font-medium uppercase tracking-wider text-text-tertiary">Phrase en cours</p>
+        {translatedSentence ? (
+          <div className="mb-4 rounded-btn bg-gradient-to-br from-primary/10 to-secondary/10 p-3">
+            <p className="mb-1 text-xs font-medium uppercase tracking-wider text-primary">
+              Traduction LSFB → Français
+            </p>
+            <motion.p
+              key={translatedSentence}
+              initial={{ opacity: 0, x: -6 }}
+              animate={{ opacity: 1, x: 0 }}
+              className="font-body text-lg font-semibold leading-relaxed text-text-primary"
+            >
+              {translatedSentence}
+            </motion.p>
+          </div>
+        ) : null}
+        <p className="mb-3 text-xs font-medium uppercase tracking-wider text-text-tertiary">Signes en cours</p>
         <motion.p
           key={live.sentenceBuffer}
           initial={{ opacity: 0 }}
@@ -538,6 +647,23 @@ export function TranslatePage(): JSX.Element {
         >
           {live.sentenceBuffer || <span className="text-text-muted">En attente de signes...</span>}
         </motion.p>
+      </motion.div>
+
+      {/* ConversationPanel — historique conversationnel */}
+      <motion.div
+        initial={{ opacity: 0, y: 20 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ delay: 0.28 }}
+      >
+        <ConversationPanel
+          history={conversationHistory}
+          currentBuilding={buildingBuffer}
+          translationMode={translationMode}
+          onReset={() => {
+            resetConversation();
+            ws.send({ action: "reset_conversation" } as unknown as LandmarkFrame);
+          }}
+        />
       </motion.div>
 
       {/* Action buttons with enhanced styling */}

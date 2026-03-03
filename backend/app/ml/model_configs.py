@@ -1,4 +1,8 @@
-"""Predefined model configurations for different capacities and use cases."""
+"""Predefined model configurations for different capacities and use cases.
+
+V1 configs use SignTransformer with ENRICHED_FEATURE_DIM (493).
+V2 configs use SignTransformerV2 with ENRICHED_FEATURE_DIM_V2 (611).
+"""
 
 from __future__ import annotations
 
@@ -6,6 +10,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from app.ml.feature_engineering import ENRICHED_FEATURE_DIM
+from app.ml.features import ENRICHED_FEATURE_DIM_V2
 
 
 @dataclass
@@ -169,7 +174,7 @@ MODEL_CONFIG_LIGHTWEIGHT = ModelConfig(
 )
 
 
-# Registry of all available configurations
+# Registry of all available V1 configurations
 MODEL_CONFIGS = {
     "baseline": MODEL_CONFIG_BASELINE,
     "lightweight": MODEL_CONFIG_LIGHTWEIGHT,
@@ -179,9 +184,195 @@ MODEL_CONFIGS = {
 }
 
 
+# =======================
+# V2 Configurations (SignTransformerV2 multi-stream)
+# =======================
+
+
+@dataclass
+class SignTransformerV2ConfigSpec:
+    """Lightweight config spec for V2 model variants (mirrors SignTransformerV2Config)."""
+
+    name: str
+    description: str
+    feature_dim: int = ENRICHED_FEATURE_DIM_V2  # 611
+    hand_hidden_dim: int = 128
+    pose_hidden_dim: int = 64
+    nmm_hidden_dim: int = 64
+    fusion_dim: int = 256
+    num_heads: int = 8
+    num_layers: int = 4
+    num_fusion_layers: int = 2
+    dropout: float = 0.1
+    use_cosine_head: bool = True
+    max_seq_len: int = 64
+    use_gcn_hand: bool = True
+    num_gcn_layers: int = 2
+    cosine_head_weight: float = 0.35
+    feature_version: int = 2
+
+    @property
+    def estimated_params(self) -> int:
+        """Rough parameter estimate (R&D guidance only)."""
+        # Hand stream: 2*(21*3*hidden + hidden^2*num_layers*4 + hidden*dim_feedforward*2)
+        hand = 2 * (63 * self.hand_hidden_dim + self.num_layers * (
+            4 * self.hand_hidden_dim ** 2 + 2 * self.hand_hidden_dim * self.hand_hidden_dim * 4
+        ))
+        pose = 126 * self.pose_hidden_dim + self.num_layers * (
+            4 * self.pose_hidden_dim ** 2 + 2 * self.pose_hidden_dim * self.pose_hidden_dim * 4
+        )
+        nmm = 50 * self.nmm_hidden_dim + self.num_layers * (
+            4 * self.nmm_hidden_dim ** 2 + 2 * self.nmm_hidden_dim * self.nmm_hidden_dim * 4
+        )
+        concat_dim = self.hand_hidden_dim + self.pose_hidden_dim + self.nmm_hidden_dim
+        fusion = concat_dim * self.fusion_dim
+        head = self.fusion_dim * 100  # assume 100 classes
+        return int(hand + pose + nmm + fusion + head)
+
+    def to_v2_config_kwargs(self, num_classes: int = 100) -> dict[str, Any]:
+        """Return kwargs for SignTransformerV2Config or SignTransformerV2.__init__."""
+        return {
+            "feature_dim": self.feature_dim,
+            "hand_hidden_dim": self.hand_hidden_dim,
+            "pose_hidden_dim": self.pose_hidden_dim,
+            "nmm_hidden_dim": self.nmm_hidden_dim,
+            "fusion_dim": self.fusion_dim,
+            "num_heads": self.num_heads,
+            "num_layers": self.num_layers,
+            "num_fusion_layers": self.num_fusion_layers,
+            "dropout": self.dropout,
+            "num_classes": num_classes,
+            "use_cosine_head": self.use_cosine_head,
+            "max_seq_len": self.max_seq_len,
+            "use_gcn_hand": self.use_gcn_hand,
+            "num_gcn_layers": self.num_gcn_layers,
+            "cosine_head_weight": self.cosine_head_weight,
+        }
+
+
+# V2 LIGHTWEIGHT: ~2M params — Edge/mobile deployment
+SIGN_TRANSFORMER_V2_CONFIG_LIGHTWEIGHT = SignTransformerV2ConfigSpec(
+    name="v2_lightweight",
+    description="V2 lightweight multi-stream (~2M params) — Edge/mobile",
+    hand_hidden_dim=64,
+    pose_hidden_dim=32,
+    nmm_hidden_dim=32,
+    fusion_dim=128,
+    num_heads=4,
+    num_layers=2,
+    num_fusion_layers=1,
+    dropout=0.1,
+)
+
+# V2 DEFAULT: ~5M params — Standard usage
+SIGN_TRANSFORMER_V2_CONFIG = SignTransformerV2ConfigSpec(
+    name="v2_default",
+    description="V2 default multi-stream (~5M params) — Balanced accuracy/speed",
+    hand_hidden_dim=128,
+    pose_hidden_dim=64,
+    nmm_hidden_dim=64,
+    fusion_dim=256,
+    num_heads=8,
+    num_layers=4,
+    num_fusion_layers=2,
+    dropout=0.1,
+)
+
+# V2 LARGE: ~12M params — Higher accuracy, GPU recommended
+SIGN_TRANSFORMER_V2_CONFIG_LARGE = SignTransformerV2ConfigSpec(
+    name="v2_large",
+    description="V2 large multi-stream (~12M params) — High accuracy, GPU recommended",
+    hand_hidden_dim=256,
+    pose_hidden_dim=128,
+    nmm_hidden_dim=128,
+    fusion_dim=512,
+    num_heads=8,
+    num_layers=6,
+    num_fusion_layers=3,
+    dropout=0.1,
+)
+
+# =======================
+# Segmentation configs
+# =======================
+
+
+@dataclass
+class SegmentationConfigSpec:
+    """Config spec for SignBoundaryDetector variants."""
+
+    name: str
+    description: str
+    feature_dim: int = ENRICHED_FEATURE_DIM_V2  # 611
+    input_selection: str = "velocity+nmm+handshape"
+    hidden_dim: int = 128
+    num_layers: int = 2
+    dropout: float = 0.1
+    use_crf: bool = False
+    min_sign_frames: int = 8
+    merge_gap_frames: int = 3
+    boundary_threshold: float = 0.5
+
+    @property
+    def estimated_params(self) -> int:
+        """Rough BiLSTM parameter estimate."""
+        # BiLSTM: 4 * (input+hidden)*hidden*2 (bidirectional)
+        from app.ml.sign_segmentation import _get_input_dim
+        input_dim = _get_input_dim(self.input_selection, self.feature_dim)
+        proj = input_dim * self.hidden_dim
+        lstm_in = self.hidden_dim
+        lstm = 4 * (lstm_in + self.hidden_dim) * self.hidden_dim * 2  # bidirectional
+        lstm *= self.num_layers
+        out = 2 * self.hidden_dim * 4   # output projection → 4 labels
+        return int(proj + lstm + out)
+
+    def to_segmentation_kwargs(self) -> dict[str, Any]:
+        """Return kwargs for SignBoundaryDetector.__init__."""
+        return {
+            "feature_dim": self.feature_dim,
+            "hidden_dim": self.hidden_dim,
+            "num_layers": self.num_layers,
+            "dropout": self.dropout,
+            "use_crf": self.use_crf,
+            "input_selection": self.input_selection,
+        }
+
+
+# Standard segmentation config (no CRF, compact input)
+SEGMENTATION_CONFIG = SegmentationConfigSpec(
+    name="segmentation_default",
+    description="SignBoundaryDetector default (~800K params) — BiLSTM BIEO tagger",
+    hidden_dim=128,
+    num_layers=2,
+    use_crf=False,
+)
+
+# CRF variant for constrained decoding
+SEGMENTATION_CONFIG_CRF = SegmentationConfigSpec(
+    name="segmentation_crf",
+    description="SignBoundaryDetector with CRF head (~800K params + CRF)",
+    hidden_dim=128,
+    num_layers=2,
+    use_crf=True,
+)
+
+
+# Extended registries
+V2_MODEL_CONFIGS: dict[str, SignTransformerV2ConfigSpec] = {
+    "v2_lightweight": SIGN_TRANSFORMER_V2_CONFIG_LIGHTWEIGHT,
+    "v2_default": SIGN_TRANSFORMER_V2_CONFIG,
+    "v2_large": SIGN_TRANSFORMER_V2_CONFIG_LARGE,
+}
+
+SEGMENTATION_CONFIGS: dict[str, SegmentationConfigSpec] = {
+    "default": SEGMENTATION_CONFIG,
+    "crf": SEGMENTATION_CONFIG_CRF,
+}
+
+
 def get_model_config(name: str) -> ModelConfig:
     """
-    Get a predefined model configuration by name.
+    Get a predefined V1 model configuration by name.
 
     Args:
         name: Configuration name (baseline, lightweight, medium, large, xlarge)
@@ -197,6 +388,29 @@ def get_model_config(name: str) -> ModelConfig:
         raise ValueError(f"Unknown model config '{name}'. Available: {available}")
 
     return MODEL_CONFIGS[name]
+
+
+def get_v2_model_config(name: str = "v2_default") -> SignTransformerV2ConfigSpec:
+    """Get a predefined V2 model configuration by name.
+
+    Args:
+        name: Configuration name (v2_lightweight, v2_default, v2_large)
+
+    Returns:
+        SignTransformerV2ConfigSpec instance
+    """
+    if name not in V2_MODEL_CONFIGS:
+        available = ", ".join(V2_MODEL_CONFIGS.keys())
+        raise ValueError(f"Unknown V2 config '{name}'. Available: {available}")
+    return V2_MODEL_CONFIGS[name]
+
+
+def get_segmentation_config(name: str = "default") -> SegmentationConfigSpec:
+    """Get a predefined segmentation configuration by name."""
+    if name not in SEGMENTATION_CONFIGS:
+        available = ", ".join(SEGMENTATION_CONFIGS.keys())
+        raise ValueError(f"Unknown segmentation config '{name}'. Available: {available}")
+    return SEGMENTATION_CONFIGS[name]
 
 
 def list_model_configs() -> list[dict[str, Any]]:
@@ -217,4 +431,22 @@ def list_model_configs() -> list[dict[str, Any]]:
             "estimated_params": config.estimated_params,
         }
         for config in MODEL_CONFIGS.values()
+    ]
+
+
+def list_v2_model_configs() -> list[dict[str, Any]]:
+    """List all V2 model configurations."""
+    return [
+        {
+            "name": c.name,
+            "description": c.description,
+            "hand_hidden_dim": c.hand_hidden_dim,
+            "pose_hidden_dim": c.pose_hidden_dim,
+            "nmm_hidden_dim": c.nmm_hidden_dim,
+            "fusion_dim": c.fusion_dim,
+            "num_layers": c.num_layers,
+            "estimated_params": c.estimated_params,
+            "feature_version": c.feature_version,
+        }
+        for c in V2_MODEL_CONFIGS.values()
     ]

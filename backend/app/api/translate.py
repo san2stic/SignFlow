@@ -638,6 +638,19 @@ async def translate_stream(websocket: WebSocket) -> None:
         await websocket.close(code=1011, reason="Failed to initialize inference pipeline")
         return
 
+    # Phase 5 — Activer automatiquement grammaire + contexte conversationnel
+    import asyncio as _asyncio
+
+    _grammar_mode = "rules"
+    try:
+        await _asyncio.to_thread(pipeline.enable_grammar_translation, mode=_grammar_mode)
+    except Exception as _exc:  # noqa: BLE001
+        logger.warning("grammar_translation_auto_enable_failed", error=str(_exc))
+    try:
+        await _asyncio.to_thread(pipeline.enable_conversation_context)
+    except Exception as _exc:  # noqa: BLE001
+        logger.warning("conversation_context_auto_enable_failed", error=str(_exc))
+
     if settings.inference_metrics_enabled:
         metrics_collector.record_routing_decision(route=route)
 
@@ -691,6 +704,32 @@ async def translate_stream(websocket: WebSocket) -> None:
             if not isinstance(payload, dict):
                 logger.warning("invalid_payload_format", type=type(payload).__name__)
                 continue
+
+            # ---------------------------------------------------------------
+            # Phase 5 — Commands from frontend (action-based messages)
+            # ---------------------------------------------------------------
+            action = payload.get("action")
+            if action is not None:
+                if action == "reset_conversation":
+                    pipeline.reset()
+                    _grammar_mode = "rules"
+                    try:
+                        await _asyncio.to_thread(pipeline.enable_grammar_translation, mode=_grammar_mode)
+                    except Exception:  # noqa: BLE001
+                        pass
+                    await websocket.send_json({"type": "conversation_reset", "ok": True})
+                    counted_token_total = 0
+                elif action == "set_grammar_mode":
+                    mode_value = str(payload.get("mode", "rules"))
+                    _grammar_mode = mode_value
+                    try:
+                        await _asyncio.to_thread(pipeline.enable_grammar_translation, mode=mode_value)
+                        await websocket.send_json({"type": "grammar_mode_set", "mode": mode_value, "ok": True})
+                    except Exception as _e:  # noqa: BLE001
+                        await websocket.send_json({"type": "grammar_mode_set", "mode": mode_value, "ok": False, "error": str(_e)})
+                else:
+                    logger.debug("unknown_ws_action", action=action)
+                continue  # Don't process as landmarks frame
 
             if "hands" not in payload and "pose" not in payload:
                 logger.warning("missing_landmarks_in_payload")
@@ -813,18 +852,64 @@ async def translate_stream(websocket: WebSocket) -> None:
 
                 # Send prediction to client
                 try:
-                    await websocket.send_json(
-                        {
-                            "prediction": prediction.prediction,
+                    ws_payload: dict = {
+                        "prediction": prediction.prediction,
+                        "confidence": prediction.confidence,
+                        "alternatives": prediction.alternatives,
+                        "sentence_buffer": prediction.sentence_buffer,
+                        "is_sentence_complete": prediction.is_sentence_complete,
+                        "decision_diagnostics": prediction.decision_diagnostics,
+                        "active_learning": active_learning_hint,
+                        "latency_ms": round(latency_ms, 1),
+                    }
+                    # Grammar translation outputs (Phase 3 — present when enabled)
+                    if prediction.translated_sentence is not None:
+                        ws_payload["translated_sentence"] = prediction.translated_sentence
+                    if prediction.grammar_tags is not None:
+                        ws_payload["grammar_tags"] = prediction.grammar_tags
+                    if prediction.translation_mode is not None:
+                        ws_payload["translation_mode"] = prediction.translation_mode
+
+                    # Phase 5 — Conversation context fields
+                    if prediction.turn_id is not None:
+                        ws_payload["turn_id"] = prediction.turn_id
+                    if prediction.is_new_turn:
+                        ws_payload["is_new_turn"] = True
+                    if prediction.conversation_context is not None:
+                        ws_payload["conversation_context"] = prediction.conversation_context
+
+                    await websocket.send_json(ws_payload)
+
+                    # Phase 5 — Emit typed sub-messages for enriched conversation events
+                    if (
+                        prediction.translated_sentence is not None
+                        and prediction.sentence_buffer
+                        and len(prediction.sentence_buffer.split()) >= 3
+                    ):
+                        sentence_msg: dict = {
+                            "type": "sentence_complete",
+                            "sentence": prediction.sentence_buffer,
+                            "translated_sentence": prediction.translated_sentence,
+                            "grammar_tags": prediction.grammar_tags or [],
                             "confidence": prediction.confidence,
-                            "alternatives": prediction.alternatives,
-                            "sentence_buffer": prediction.sentence_buffer,
-                            "is_sentence_complete": prediction.is_sentence_complete,
-                            "decision_diagnostics": prediction.decision_diagnostics,
-                            "active_learning": active_learning_hint,
-                            "latency_ms": round(latency_ms, 1),
+                            "raw_signs": prediction.sentence_buffer.split(),
+                            "translation_mode": prediction.translation_mode or _grammar_mode,
+                            "turn_id": prediction.turn_id,
                         }
-                    )
+                        await websocket.send_json(sentence_msg)
+
+                    if prediction.is_new_turn and prediction.turn_id is not None:
+                        await websocket.send_json({
+                            "type": "new_turn",
+                            "turn_id": prediction.turn_id,
+                        })
+
+                    if prediction.conversation_context is not None:
+                        await websocket.send_json({
+                            "type": "conversation_update",
+                            "context": prediction.conversation_context,
+                        })
+
                 except WebSocketDisconnect:
                     raise
                 except RuntimeError as e:

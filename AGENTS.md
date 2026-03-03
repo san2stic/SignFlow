@@ -1,6 +1,6 @@
 # SignFlow - AGENTS.md
 
-Last updated: 2026-02-16
+Last updated: 2026-03-03
 
 This document is the implementation-level reference for humans and coding agents working in this repository.
 It describes what exists in code today, how to run it, and what is partially implemented.
@@ -20,25 +20,20 @@ Primary language target in current docs/data: LSFB.
 
 ## 2. Current Status (Important)
 
-The backend is feature-rich and exposes most v1 API capabilities.
+The backend is feature-rich and exposes v1 + v2 ML capabilities and Studio API.
 
-The frontend currently has two UI tracks in code:
-- Active routes mounted in `frontend/src/routes.tsx`:
-  - `/dashboard` -> `frontend/src/pages/Dashboard.tsx` (static/demo-like UI)
-  - `/translate` -> `frontend/src/pages/TranslatePage.tsx` (live camera + WS)
-  - `/dictionary` -> `frontend/src/pages/Dictionary.tsx` (placeholder)
-  - `/training` -> `frontend/src/pages/Training.tsx` (placeholder)
-  - `/settings` -> `frontend/src/pages/Settings.tsx` (placeholder)
-  - `/profile` -> `frontend/src/pages/Profile.tsx`
-- Advanced pages implemented but not wired by default:
-  - `frontend/src/pages/DashboardPage.tsx`
-  - `frontend/src/pages/DictionaryPage.tsx`
-  - `frontend/src/pages/TrainPage.tsx`
-  - `frontend/src/pages/SettingsPage.tsx`
+Active routes mounted in `frontend/src/routes.tsx` (V2 — Phase 0+):
+- `/dashboard` -> `frontend/src/pages/DashboardPage.tsx` (live API metrics)
+- `/translate` -> `frontend/src/pages/TranslatePage.tsx` (live camera + WS + conversation)
+- `/dictionary` -> `frontend/src/pages/DictionaryPage.tsx` (graph/cards/detail/backlinks)
+- `/training` -> `frontend/src/pages/TrainPage.tsx` (training wizard + validation)
+- `/settings` -> `frontend/src/pages/SettingsPage.tsx`
+- `/profile` -> `frontend/src/pages/Profile.tsx`
+- `/studio` -> `frontend/src/pages/StudioPage.tsx` (annotation session list)
+- `/studio/sessions/:id` -> `frontend/src/pages/StudioSessionPage.tsx`
+- `/studio/videos/:id/annotate` -> `frontend/src/pages/VideoAnnotationPage.tsx`
 
-Known frontend routing mismatch in current code:
-- `TranslatePage` and `DictionaryPage` navigate to `/train`, but router exposes `/training`.
-- Result: this redirection path is currently broken unless router is updated.
+Navigation routing is consistent: all internal links use `/training` (not `/train`).
 
 ## 3. Repository Map
 
@@ -187,22 +182,56 @@ Stats (`/stats`):
 - `GET /stats/accuracy-history`
 - `GET /stats/signs-per-category`
 
+Studio (`/studio`):
+- `GET /studio/sessions`
+- `POST /studio/sessions`
+- `GET /studio/sessions/{session_id}`
+- `PATCH /studio/sessions/{session_id}`
+- `DELETE /studio/sessions/{session_id}`
+- `POST /studio/sessions/{session_id}/videos`
+- `DELETE /studio/sessions/{session_id}/videos/{video_id}`
+- `GET /studio/videos/{video_id}/annotations`
+- `POST /studio/videos/{video_id}/annotations`
+- `PUT /studio/annotations/{annotation_id}`
+- `DELETE /studio/annotations/{annotation_id}`
+- `POST /studio/videos/{video_id}/annotations/bulk`
+- `GET /studio/annotations/{annotation_id}/grammar`
+- `POST /studio/annotations/{annotation_id}/grammar`
+- `PUT /studio/grammar/{grammar_id}`
+- `DELETE /studio/grammar/{grammar_id}`
+- `GET /studio/grammar/templates`
+- `GET /studio/sessions/{session_id}/export?format=json|csv`
+- `POST /studio/sessions/{session_id}/import`
+- `GET /studio/sessions/{session_id}/stats`
+- `GET /studio/stats`
+- `GET /studio/sessions/{session_id}/timeline`
+
 ### 5.4 Inference pipeline
 
 Core file: `backend/app/ml/pipeline.py`
 
-Highlights:
-- Sliding-window landmark inference state machine (`IDLE`, `RECORDING`, `INFERRING`).
-- Transformer model (`SignTransformer`, `backend/app/ml/model.py`) with:
-  - positional encoding
-  - multiscale temporal stem
-  - optional cosine head blending
-  - CLS + masked pooling logic
-- Post-processing:
-  - confidence thresholding
-  - prediction smoothing
-  - sentence buffer
-  - rejection reasons/diagnostics
+Feature versions:
+- `feature_version=1` (default): `ENRICHED_FEATURE_DIM=493` — V1 feature set.
+- `feature_version=2`: `ENRICHED_FEATURE_DIM_V2=611` — adds handshape geometry (84 dims), facial action units (32 dims), signing space encoding (18 dims) via `extract_features_v2()`.
+
+Model architectures:
+- V1: `SignTransformer` (`backend/app/ml/model.py`) — positional encoding, multiscale temporal stem, optional cosine head blending, CLS + masked pooling.
+- V2: `SignTransformerV2` (`backend/app/ml/model_v2.py`) — multi-stream architecture (~5M params), separate pose/hand/face streams with cross-attention fusion.
+- Segmentation: `SignBoundaryDetector` (`backend/app/ml/sign_segmentation.py`) — BiLSTM for sign boundary detection and segmentation.
+
+Conversation and grammar:
+- `ConversationContext` (`backend/app/ml/conversation_context.py`) — multi-turn conversation management, anaphora resolution, spatial referent tracking.
+- `grammar/` package — `lsfb_rules.py` (rule-based corrections), `lsfb_crf.py` (CRF tagger), `lsfb_translator.py` (`LSFBToFrenchTranslator` for LSFB→French).
+- Enable on pipeline: `pipeline.enable_grammar_translation()` and `pipeline.enable_conversation_context()`.
+
+WS messages emitted by `TranslatePage`:
+- `prediction` — single sign prediction with confidence.
+- `sentence_complete` — full sentence buffer flush.
+- `conversation_update` — updated conversation history.
+- `new_turn` — new conversational turn detected.
+
+Post-processing:
+- confidence thresholding, prediction smoothing, sentence buffer, rejection reasons/diagnostics.
 - Optional TTA settings via env and runtime config.
 - Optional TorchServe client path in translate endpoint.
 - Optional drift detection and active-learning uncertainty queue.
@@ -262,24 +291,32 @@ Main page: `frontend/src/pages/TranslatePage.tsx`
 Flow:
 - camera stream (`useCamera`) + MediaPipe (`useMediaPipe`).
 - serialize landmarks and send over WS (`useWebSocket`) to `/api/v1/translate/stream`.
-- receive prediction/confidence/alternatives/sentence buffer.
-- update Zustand translate store.
+- receive prediction/confidence/alternatives/sentence buffer + conversation events.
+- WS message types received: `prediction`, `sentence_complete`, `conversation_update`, `new_turn`.
+- update Zustand translate store (including conversation history).
+- `ConversationPanel` component renders the conversation history with turn grouping.
+- `SignConfidenceBar` component renders real-time confidence for the current sign.
 - optional speech synthesis.
 - unknown-sign prompt logic with cooldown and pre-roll capture.
 
-### 6.3 Training and dictionary UI tracks
+### 6.3 Training, dictionary and Studio UI
 
-There is complete V2 UI code for:
-- training wizard and validation (`TrainPage`, `TrainingWizard`)
-- dictionary graph/cards/detail/backlinks (`DictionaryPage`)
-- dashboard with live API metrics (`DashboardPage`)
+V2 pages now mounted by default:
+- `TrainPage` — training wizard and validation.
+- `DictionaryPage` — graph/cards/detail/backlinks.
+- `DashboardPage` — dashboard with live API metrics.
+- `SettingsPage` — user settings.
 
-These are currently not mounted by default routes.
+Studio pages (new):
+- `StudioPage` — annotation session list and creation.
+- `StudioSessionPage` — session detail with video list and progress.
+- `VideoAnnotationPage` — frame-level video annotation with timeline.
+- Studio components in `frontend/src/components/studio/`: `AnnotationTimeline`, `AnnotationEditor`, `GrammarAnnotationPanel`, `SessionCard`, `VideoPlayer`, `BulkImportModal`, `ExportModal`.
 
 ### 6.4 State stores
 
 - `authStore` for JWT + user session persistence.
-- `translateStore` for live translation data.
+- `translateStore` for live translation data + conversation history turns.
 - `trainingStore` for session/progress/pending clip.
 - `labelingStore` for unlabeled video workflow.
 - `settingsStore` for local translation preferences.
@@ -419,11 +456,13 @@ Before production use:
 
 ## 12. Known Gaps / Technical Debt
 
-- Router currently mounts placeholder dictionary/training/settings pages instead of advanced V2 pages.
-- `/train` navigation appears in some components while actual route is `/training`.
 - Health endpoint is `/healthz`; any scripts using `/health` are outdated.
-- Frontend API base handling should be consolidated to one strategy.
+- Frontend API base handling should be consolidated to one strategy (`src/api/client.ts`).
 - Auth is not yet enforced on most business endpoints.
+- CRF model (`lsfb_crf.py`) is not trained yet — uses identity mapping until a real training corpus is available.
+- `SignBoundaryDetector` BiLSTM requires real segmentation-labelled training data; currently initialized with random weights.
+- Seq2Seq grammar (future): `lsfb_translator.py` uses rule-based + CRF approach; a full neural seq2seq translation model is planned but not implemented.
+- `ConversationContext` anaphora resolution is heuristic-based; no coreference model is integrated.
 
 ## 13. Agent Working Rules for this Repo
 

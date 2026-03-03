@@ -288,7 +288,7 @@ export function TranslatePage(): JSX.Element {
     showUnknownPromptRef.current = false;
     clearUnknownPromptTimer();
     resetUnknownPromptState();
-    navigate("/train");
+    navigate("/training");
   };
 
   const addUnknownToTraining = (): void => {
@@ -370,7 +370,7 @@ export function TranslatePage(): JSX.Element {
         <button className="touch-btn bg-red-500 text-white" onClick={reset}>
           Reset
         </button>
-        <button className="touch-btn bg-primary text-white" onClick={() => navigate("/train")}>
+        <button className="touch-btn bg-primary text-white" onClick={() => navigate("/training")}>
           Ajouter
         </button>
       </div>

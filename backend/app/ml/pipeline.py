@@ -13,11 +13,45 @@ import structlog
 import torch
 
 from app.ml.feature_alignment import align_numpy_features, resolve_model_feature_dim
-from app.ml.features import FrameLandmarks, normalize_landmarks
+from app.ml.features import (
+    FrameLandmarks,
+    normalize_landmarks,
+    extract_features_v2,
+    ENRICHED_FEATURE_DIM_V2,
+)
 from app.ml.model import SignTransformer
 from app.ml.tta import TTAConfig, TTAGenerator
 from app.ml.trainer import load_model_checkpoint
 from app.ml.gpu_manager import get_gpu_manager
+
+# Optional V2 model and segmentation imports (lazy to avoid circular deps)
+try:
+    from app.ml.model_v2 import SignTransformerV2
+    _MODEL_V2_AVAILABLE = True
+except Exception:
+    _MODEL_V2_AVAILABLE = False
+
+# Optional grammar translation (Phase 3 — requires only numpy, always attempted)
+try:
+    from app.ml.grammar.lsfb_translator import LSFBToFrenchTranslator
+    _GRAMMAR_AVAILABLE = True
+except Exception:  # noqa: BLE001
+    _GRAMMAR_AVAILABLE = False
+    LSFBToFrenchTranslator = None  # type: ignore[assignment,misc]
+
+# Optional conversation context (Phase 5)
+try:
+    from app.ml.conversation_context import ConversationContext
+    _CONVERSATION_CONTEXT_AVAILABLE = True
+except Exception:  # noqa: BLE001
+    _CONVERSATION_CONTEXT_AVAILABLE = False
+    ConversationContext = None  # type: ignore[assignment,misc]
+
+try:
+    from app.ml.sign_segmentation import SignBoundaryDetector, motion_energy_fallback
+    _SEGMENTATION_AVAILABLE = True
+except Exception:
+    _SEGMENTATION_AVAILABLE = False
 
 logger = structlog.get_logger(__name__)
 
@@ -48,6 +82,14 @@ class Prediction:
     sentence_buffer: str
     is_sentence_complete: bool
     decision_diagnostics: dict[str, object] | None = None
+    # Grammar translation outputs (Phase 3 — optional, populated when grammar_translator is active)
+    translated_sentence: str | None = None   # Phrase française avec grammaire LSFB appliquée
+    grammar_tags: list[str] | None = None    # Tags BIO CRF (debug/visualisation frontend)
+    translation_mode: str | None = None      # 'rules' | 'crf' | 'seq2seq'
+    # Conversation context (Phase 5 — optional, populated when conversation_context is active)
+    turn_id: int | None = None               # Identifiant du tour de parole courant
+    is_new_turn: bool = False                # True si nouveau tour détecté
+    conversation_context: dict | None = None # Résumé du contexte pour le frontend
 
 
 class SignFlowInferencePipeline:
@@ -81,6 +123,7 @@ class SignFlowInferencePipeline:
         tta_spatial_noise_std: float = 0.005,
         calibration_temperature: float | None = None,
         class_thresholds: dict[str, float] | None = None,
+        feature_version: int = 1,
     ) -> None:
         """
         Initialize inference pipeline.
@@ -108,6 +151,9 @@ class SignFlowInferencePipeline:
             tta_enable_spatial_noise: Whether to include spatial landmark noise.
             tta_temporal_jitter_ratio: Max relative speed perturbation for temporal jitter.
             tta_spatial_noise_std: Gaussian std for spatial perturbation.
+            feature_version: Feature extraction version. 1 = legacy (493 dims),
+                2 = enriched V2 with NMM/handshape/signing-space (611 dims).
+                Can also be auto-detected from model metadata via ``set_feature_version_from_model``.
         """
         self.seq_len = seq_len
         self.model_version = str(model_version or "unknown")
@@ -186,10 +232,37 @@ class SignFlowInferencePipeline:
         self._recording_frame_count = 0
         self._latest_frontend_confidence = 1.0
 
-        # Load model if path provided
-        self.model: SignTransformer | None = None
+        # Feature extraction version (1 = V1 legacy, 2 = V2 enriched)
+        self.feature_version: int = int(feature_version) if feature_version in (1, 2) else 1
+        # Track previous wrist positions for signing-space motion features (V2 only)
+        self._prev_right_wrist: np.ndarray | None = None
+        self._prev_left_wrist: np.ndarray | None = None
+
+        if self.feature_version == 2:
+            logger.info(
+                "pipeline_feature_version_v2",
+                enriched_dim=ENRICHED_FEATURE_DIM_V2,
+                nmm_enabled=True,
+                handshape_enabled=True,
+                signing_space_enabled=True,
+            )
+
+        # Load model if path provided (V1 or V2 — resolved at load time)
+        self.model: SignTransformer | SignTransformerV2 | None = None  # type: ignore[assignment]
         self.onnx_session: ort.InferenceSession | None = None
         self.use_onnx = False
+        self._model_is_v2: bool = False
+
+        # Optional segmentation model (BiLSTM boundary detector)
+        self.segmentation_model: SignBoundaryDetector | None = None  # type: ignore[assignment]
+        self._use_bilstm_segmentation: bool = False
+
+        # Optional grammar translator (Phase 3 — LSFB → Français)
+        self.grammar_translator: LSFBToFrenchTranslator | None = None  # type: ignore[assignment]
+
+        # Conversation context (Phase 5 — maintains cross-turn conversational state)
+        self.conversation_context: ConversationContext | None = None  # type: ignore[assignment]
+
         if model_path:
             self.load_model(model_path)
 
@@ -224,10 +297,30 @@ class SignFlowInferencePipeline:
             self._load_pytorch_model(model_path)
 
     def _load_pytorch_model(self, model_path: Path) -> None:
-        """Load PyTorch model from checkpoint."""
+        """Load PyTorch model from checkpoint (auto-detects V1/V2 architecture)."""
         try:
             logger.info("loading_pytorch_model", path=str(model_path))
-            self.model = load_model_checkpoint(str(model_path), device=str(self.device))
+
+            # Peek at checkpoint to decide architecture
+            try:
+                _ckpt = torch.load(str(model_path), map_location="cpu", weights_only=False)
+                _arch = _ckpt.get("architecture", "")
+            except Exception:
+                _arch = ""
+
+            if _arch == "SignTransformerV2" and _MODEL_V2_AVAILABLE:
+                self.model = SignTransformerV2.load_checkpoint(  # type: ignore[assignment]
+                    model_path, device=str(self.device), strict=True
+                )
+                self._model_is_v2 = True
+                # Auto-activate V2 feature pipeline
+                if self.feature_version != 2:
+                    self.feature_version = 2
+                    logger.info("feature_version_auto_set_v2", reason="v2_checkpoint_detected")
+            else:
+                self.model = load_model_checkpoint(str(model_path), device=str(self.device))
+                self._model_is_v2 = False
+
             self.model.to(self.device)
             self.model.set_inference_mode()
             self.use_onnx = False
@@ -235,12 +328,187 @@ class SignFlowInferencePipeline:
             logger.info(
                 "pytorch_model_loaded_successfully",
                 num_classes=self.model.num_classes,
+                architecture="SignTransformerV2" if self._model_is_v2 else "SignTransformer",
                 device=str(self.device),
             )
         except Exception as e:
             logger.error("failed_to_load_pytorch_model", path=str(model_path), error=str(e))
             self.model = None
             raise
+
+    def load_segmentation_model(self, model_path: str | Path) -> None:
+        """Load an optional SignBoundaryDetector checkpoint for BiLSTM segmentation.
+
+        When loaded, replaces the heuristic motion_energy segmentation with the
+        learned BiLSTM boundary detector.
+
+        Args:
+            model_path: Path to SignBoundaryDetector .pt checkpoint.
+        """
+        if not _SEGMENTATION_AVAILABLE:
+            logger.warning(
+                "segmentation_model_load_skipped",
+                reason="sign_segmentation module not available",
+            )
+            return
+        try:
+            from app.ml.sign_segmentation import SignBoundaryDetector
+            self.segmentation_model = SignBoundaryDetector.load_checkpoint(
+                model_path, device=str(self.device)
+            )
+            self.segmentation_model.set_inference_mode()
+            self._use_bilstm_segmentation = True
+            logger.info("segmentation_model_loaded", path=str(model_path))
+        except Exception as e:
+            logger.error("segmentation_model_load_failed", path=str(model_path), error=str(e))
+            self.segmentation_model = None
+            self._use_bilstm_segmentation = False
+
+    def enable_conversation_context(
+        self,
+        max_history: int = 20,
+        turn_gap_seconds: float = 3.0,
+    ) -> None:
+        """Active le contexte conversationnel pour cette session.
+
+        Args:
+            max_history: Nombre maximum de tours gardés en mémoire.
+            turn_gap_seconds: Durée de silence pour détecter un nouveau tour.
+        """
+        if not _CONVERSATION_CONTEXT_AVAILABLE or ConversationContext is None:
+            logger.warning(
+                "conversation_context_unavailable",
+                reason="app.ml.conversation_context module could not be imported",
+            )
+            return
+        try:
+            self.conversation_context = ConversationContext(
+                max_history=max_history,
+                turn_gap_seconds=turn_gap_seconds,
+            )
+            logger.info(
+                "conversation_context_enabled",
+                max_history=max_history,
+                turn_gap_seconds=turn_gap_seconds,
+            )
+        except Exception as exc:
+            logger.error("conversation_context_init_failed", error=str(exc))
+            self.conversation_context = None
+
+    def enable_grammar_translation(
+        self,
+        mode: str = "rules",
+        crf_path: str | None = None,
+    ) -> None:
+        """Active la traduction grammaticale LSFB → Français.
+
+        Args:
+            mode: Stratégie de traduction parmi ``'rules'``, ``'crf'``,
+                ``'seq2seq'``.
+            crf_path: Chemin optionnel vers un modèle CRF pré-entraîné
+                (fichier pickle produit par ``LSFBSequenceTagger.save()``).
+
+        Si le module de grammaire n'est pas disponible, un avertissement est
+        loggé et la traduction reste désactivée.
+        """
+        if not _GRAMMAR_AVAILABLE:
+            logger.warning(
+                "grammar_translation_unavailable",
+                reason="app.ml.grammar module could not be imported",
+            )
+            return
+        try:
+            self.grammar_translator = LSFBToFrenchTranslator(
+                mode=mode,
+                crf_model_path=crf_path,
+            )
+            logger.info(
+                "grammar_translation_enabled",
+                mode=self.grammar_translator.mode,
+                crf_loaded=self.grammar_translator.sequence_tagger.crf is not None,
+            )
+        except Exception as exc:
+            logger.error("grammar_translation_init_failed", error=str(exc))
+            self.grammar_translator = None
+
+    def _translate_sentence_buffer(
+        self,
+        token_confidences: list[float] | None = None,
+    ) -> tuple[str | None, list[str] | None, str | None]:
+        """Traduit les tokens courants du sentence_buffer via le traducteur grammatical.
+
+        Args:
+            token_confidences: Confidences individuelles par token (même longueur que
+                ``sentence_tokens``). Si ``None``, une valeur par défaut de 0.7 est utilisée.
+
+        Returns:
+            Tuple (translated_sentence, grammar_tags, translation_mode) ou
+            (None, None, None) si la traduction est désactivée ou échoue.
+        """
+        if self.grammar_translator is None or not self.sentence_tokens:
+            return None, None, None
+        try:
+            if token_confidences is None or len(token_confidences) != len(self.sentence_tokens):
+                confs = [0.7] * len(self.sentence_tokens)
+            else:
+                confs = list(token_confidences)
+            token_dicts = [
+                {"label": label, "confidence": conf}
+                for label, conf in zip(self.sentence_tokens, confs)
+            ]
+            result = self.grammar_translator.translate_buffer(token_dicts)
+            # Retourner aussi les tags depuis la dernière invocation du tagger
+            last_tags: list[str] | None = None
+            if hasattr(self.grammar_translator, "sequence_tagger"):
+                tagger = self.grammar_translator.sequence_tagger
+                if hasattr(tagger, "_last_tags"):
+                    last_tags = list(tagger._last_tags)
+            return result, last_tags, self.grammar_translator.mode
+        except Exception as exc:
+            logger.warning("grammar_translation_failed", error=str(exc))
+            return None, None, None
+
+    def _flush_complete_turn(
+        self,
+        translated_text: str,
+        grammar_tags: list[str] | None,
+        confidence: float,
+    ) -> tuple[int | None, bool, dict | None]:
+        """Enregistre un tour terminé dans le contexte conversationnel.
+
+        Appelé après qu'une phrase complète a été traduite (``is_sentence_complete``
+        ou seuil de tokens atteint).
+
+        Args:
+            translated_text: Texte français traduit.
+            grammar_tags: Tags BIO du CRF.
+            confidence: Confiance agrégée du tour.
+
+        Returns:
+            Tuple (turn_id, is_new_turn, context_summary).
+        """
+        if self.conversation_context is None:
+            return None, False, None
+
+        is_new = self.conversation_context.is_new_turn()
+
+        # Résolution anaphorique avant enregistrement
+        resolved_text = self.conversation_context.resolve_anaphora(translated_text)
+        if resolved_text != translated_text:
+            logger.debug(
+                "anaphora_resolved_in_turn",
+                original=translated_text[:60],
+                resolved=resolved_text[:60],
+            )
+
+        turn = self.conversation_context.add_turn(
+            text=resolved_text,
+            raw_signs=list(self.sentence_tokens),
+            grammar_tags=list(grammar_tags or []),
+            confidence=confidence,
+        )
+        context_summary = self.conversation_context.get_context_summary()
+        return turn.id, is_new, context_summary
 
     def _load_onnx_model(self, model_path: Path) -> None:
         """Load ONNX model for inference."""
@@ -317,6 +585,37 @@ class SignFlowInferencePipeline:
         self.labels = aligned
         logger.debug("labels_set", num_labels=len(self.labels))
 
+    def set_feature_version_from_model(self, model_metadata: dict | None = None) -> None:
+        """Auto-detect feature version from model metadata.
+
+        Reads the ``feature_version`` key from model metadata dict (stored in
+        ``ModelVersion.extra_metadata`` or checkpoint ``config``). Falls back to
+        checking ``input_dim`` against known constants.
+
+        Args:
+            model_metadata: Optional dict with a ``feature_version`` key.
+                If None, attempts to read from self.model's config when available.
+        """
+        if model_metadata and "feature_version" in model_metadata:
+            v = int(model_metadata["feature_version"])
+            if v in (1, 2):
+                self.feature_version = v
+                logger.info("feature_version_from_metadata", feature_version=v)
+                return
+
+        # Fallback: detect from model input_dim
+        if self.model is not None:
+            try:
+                input_dim = int(self.model.input_dim)  # type: ignore[attr-defined]
+                if input_dim == ENRICHED_FEATURE_DIM_V2:
+                    self.feature_version = 2
+                    logger.info("feature_version_autodetected", feature_version=2, input_dim=input_dim)
+                    return
+            except AttributeError:
+                pass
+
+        logger.debug("feature_version_unchanged", feature_version=self.feature_version)
+
     def spawn_session(self) -> SignFlowInferencePipeline:
         """Create an isolated per-session pipeline sharing only immutable runtime artifacts."""
         session_pipeline = SignFlowInferencePipeline(
@@ -345,6 +644,7 @@ class SignFlowInferencePipeline:
             tta_spatial_noise_std=self.tta_spatial_noise_std,
             calibration_temperature=self.calibration_temperature,
             class_thresholds=dict(self.class_thresholds),
+            feature_version=self.feature_version,
         )
         session_pipeline.model = self.model
         session_pipeline.onnx_session = self.onnx_session
@@ -379,11 +679,31 @@ class SignFlowInferencePipeline:
         hand_visibility = self._blend_hand_visibility(raw_hand_visibility, frontend_confidence)
         self.hand_visibility_history.append(hand_visibility)
 
-        features = normalize_landmarks(
-            frame,
-            include_face=False,
-            include_face_expressions=True,
-        )
+        if self.feature_version == 2:
+            features = extract_features_v2(
+                payload,
+                include_handshape=True,
+                include_nmm=True,
+                include_signing_space=True,
+                prev_right_wrist=self._prev_right_wrist,
+                prev_left_wrist=self._prev_left_wrist,
+            )
+            # Update wrist history for next-frame motion estimation
+            import numpy as _np  # local alias to avoid shadowing
+            _rh = payload.get("hands", {}).get("right", [])
+            _lh = payload.get("hands", {}).get("left", [])
+            if _rh:
+                _rh_arr = _np.array(_rh[:3] if len(_rh) >= 3 else _rh, dtype=_np.float32).reshape(-1)
+                self._prev_right_wrist = _rh_arr[:3] if _rh_arr.shape[0] >= 3 else None
+            if _lh:
+                _lh_arr = _np.array(_lh[:3] if len(_lh) >= 3 else _lh, dtype=_np.float32).reshape(-1)
+                self._prev_left_wrist = _lh_arr[:3] if _lh_arr.shape[0] >= 3 else None
+        else:
+            features = normalize_landmarks(
+                frame,
+                include_face=False,
+                include_face_expressions=True,
+            )
         self.frame_buffer.append(features)
         self._current_motion_energy = self._compute_motion_energy()
         self.motion_history.append(self._current_motion_energy)
@@ -579,9 +899,13 @@ class SignFlowInferencePipeline:
         )
 
     def _prepare_enriched_window(self) -> np.ndarray | None:
-        """Build an enriched feature window from the buffered raw landmarks."""
+        """Build an enriched feature window from the buffered raw landmarks.
+
+        When feature_version == 2, the buffer already contains V2 (611-dim) features
+        extracted by extract_features_v2(). We only need to resample to seq_len.
+        For V1, we additionally apply compute_enriched_features().
+        """
         from app.ml.dataset import temporal_resample
-        from app.ml.feature_engineering import compute_enriched_features
 
         if not self.frame_buffer:
             return None
@@ -589,7 +913,107 @@ class SignFlowInferencePipeline:
         buffer_array = np.stack(list(self.frame_buffer), axis=0)
         trimmed = self._trim_recording_window(buffer_array, trailing_rest=self._rest_frame_count)
         resampled = temporal_resample(trimmed, target_len=self.seq_len)
+
+        if self.feature_version == 2:
+            # V2 features already complete; no additional enrichment needed
+            return resampled
+
+        # V1 legacy path
+        from app.ml.feature_engineering import compute_enriched_features
         return compute_enriched_features(resampled)
+
+    def _infer_window_v2(self, window: np.ndarray) -> tuple[str, float, list[dict[str, float]]]:
+        """Run inference using SignTransformerV2 on a V2 feature window.
+
+        This mirrors _infer_window() but asserts the model is V2.
+        Falls back to _infer_window() if model is not V2.
+
+        Args:
+            window: (seq_len, 611) V2 feature array
+
+        Returns:
+            (prediction_label, confidence, alternatives)
+        """
+        if not self._model_is_v2 or self.model is None:
+            return self._infer_window(window)
+
+        # V2 inference uses the same probability pipeline — model is already V2
+        return self._infer_window(window)
+
+    def detect_boundaries_bilstm(
+        self,
+        feature_sequence: np.ndarray,
+    ) -> list[tuple[int, int]]:
+        """Detect sign boundaries using the BiLSTM segmentation model.
+
+        Falls back to motion_energy heuristic if no segmentation model is loaded.
+
+        Args:
+            feature_sequence: (seq_len, 611) V2 feature array
+
+        Returns:
+            List of (start_frame, end_frame) tuples (inclusive, 0-indexed)
+        """
+        if self._use_bilstm_segmentation and self.segmentation_model is not None:
+            try:
+                return self.segmentation_model.detect_boundaries(
+                    feature_sequence,
+                    device=str(self.device),
+                )
+            except Exception as e:
+                logger.warning(
+                    "bilstm_segmentation_failed_fallback",
+                    error=str(e),
+                )
+
+        # Fallback: heuristic motion energy
+        if _SEGMENTATION_AVAILABLE:
+            return motion_energy_fallback(
+                feature_sequence,
+                motion_start_threshold=self.motion_start_threshold,
+                rest_frames_threshold=self.rest_frames_threshold,
+                min_recording_frames=self.min_recording_frames,
+            )
+
+        # Simple built-in fallback
+        return self._motion_energy_segmentation_simple(feature_sequence)
+
+    def _motion_energy_segmentation_simple(
+        self, feature_sequence: np.ndarray
+    ) -> list[tuple[int, int]]:
+        """In-line motion energy segmentation (no external dependency)."""
+        seq_len = feature_sequence.shape[0]
+        # Use velocity block if feature is V2, else use all features
+        if feature_sequence.shape[1] > 462:
+            vel = feature_sequence[:, 237:462]
+        else:
+            vel = feature_sequence
+        me = np.linalg.norm(vel, axis=1) / max(vel.shape[1], 1)
+
+        segments: list[tuple[int, int]] = []
+        in_sign = False
+        start = 0
+        count = 0
+        rest_count = 0
+        for i in range(seq_len):
+            if not in_sign:
+                if me[i] > self.motion_start_threshold:
+                    in_sign = True
+                    start = i
+                    count = 1
+                    rest_count = 0
+            else:
+                count += 1
+                if me[i] < self.motion_start_threshold:
+                    rest_count += 1
+                else:
+                    rest_count = 0
+                if rest_count >= self.rest_frames_threshold and count >= self.min_recording_frames:
+                    segments.append((start, i - rest_count))
+                    in_sign = False
+        if in_sign and count >= self.min_recording_frames:
+            segments.append((start, seq_len - 1))
+        return segments
 
     def _normalize_alternatives(self, alternatives: list[dict[str, float]] | None) -> list[dict[str, float]]:
         """Normalize alternatives payload shape and numeric confidence."""
@@ -648,11 +1072,46 @@ class SignFlowInferencePipeline:
         self._recording_frame_count = 0
         self.state = InferenceState.IDLE
 
-        if filtered_label != "NONE" and filtered_confidence >= effective_threshold:
+        is_accepted = filtered_label != "NONE" and filtered_confidence >= effective_threshold
+
+        if is_accepted:
             if not self.sentence_tokens or self.sentence_tokens[-1] != filtered_label:
                 self.sentence_tokens.append(filtered_label)
+            # Update conversation context sign time
+            if self.conversation_context is not None:
+                self.conversation_context.touch_sign_time()
 
         sentence = " ".join(self.sentence_tokens)
+
+        # Grammar translation (Phase 3) — applied when enabled
+        translated_sentence: str | None = None
+        grammar_tags: list[str] | None = None
+        translation_mode: str | None = None
+        if self.grammar_translator is not None and self.sentence_tokens:
+            translated_sentence, grammar_tags, translation_mode = (
+                self._translate_sentence_buffer(
+                    token_confidences=[filtered_confidence] * len(self.sentence_tokens)
+                )
+            )
+
+        # Conversation context (Phase 5) — enrich prediction with turn info
+        turn_id: int | None = None
+        is_new_turn: bool = False
+        context_summary: dict | None = None
+        if (
+            self.conversation_context is not None
+            and translated_sentence is not None
+            and self.sentence_tokens
+        ):
+            # Flush turn when sentence has enough tokens (≥ 3) — heuristic for sentence-complete
+            # The API layer will also flush on is_sentence_complete events
+            if len(self.sentence_tokens) >= 3:
+                turn_id, is_new_turn, context_summary = self._flush_complete_turn(
+                    translated_text=translated_sentence,
+                    grammar_tags=grammar_tags,
+                    confidence=filtered_confidence,
+                )
+
         return Prediction(
             prediction=filtered_label,
             confidence=filtered_confidence,
@@ -660,6 +1119,12 @@ class SignFlowInferencePipeline:
             sentence_buffer=sentence,
             is_sentence_complete=False,
             decision_diagnostics=decision_trace,
+            translated_sentence=translated_sentence,
+            grammar_tags=grammar_tags,
+            translation_mode=translation_mode,
+            turn_id=turn_id,
+            is_new_turn=is_new_turn,
+            conversation_context=context_summary,
         )
 
     def reset(self) -> None:
@@ -680,6 +1145,9 @@ class SignFlowInferencePipeline:
             "status": "idle",
             "reason": "reset",
         }
+        # Reset conversation context if present (keeps the context object, just clears state)
+        if self.conversation_context is not None:
+            self.conversation_context.clear()
 
     def snapshot_decision_diagnostics(self) -> dict[str, object]:
         """Expose serializable decision diagnostics for audit and tests."""

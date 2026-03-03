@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Response, status
 from fastapi.responses import FileResponse, StreamingResponse
 from sqlalchemy.orm import Session
 
@@ -15,11 +15,12 @@ media_service = MediaService()
 
 
 @router.delete("/{video_id}", status_code=status.HTTP_204_NO_CONTENT, dependencies=[Depends(enforce_write_rate_limit)])
-def delete_video(video_id: str, db: Session = Depends(get_db)) -> None:
+def delete_video(video_id: str, db: Session = Depends(get_db)) -> Response:
     """Delete one video by UUID."""
     deleted = media_service.delete_video(db, video_id)
     if not deleted:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Video not found")
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.get("/{video_id}/stream", dependencies=[Depends(enforce_rate_limit)])

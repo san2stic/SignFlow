@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Response, UploadFile, status
 from sqlalchemy.orm import Session
 
 from app.api.deps import enforce_rate_limit, enforce_write_rate_limit, get_app_settings, get_db
@@ -81,11 +81,12 @@ def update_sign(sign_id: str, payload: SignUpdate, db: Session = Depends(get_db)
 
 
 @router.delete("/{sign_id}", status_code=status.HTTP_204_NO_CONTENT, dependencies=[Depends(enforce_write_rate_limit)])
-def delete_sign(sign_id: str, db: Session = Depends(get_db)) -> None:
+def delete_sign(sign_id: str, db: Session = Depends(get_db)) -> Response:
     """Delete sign and linked resources."""
     deleted = sign_service.delete_sign(db, sign_id)
     if not deleted:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Sign not found")
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.post(
