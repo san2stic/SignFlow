@@ -81,6 +81,9 @@ export function TrainingWizard({ videoRef, cameraRef, initialAssignedSign }: Tra
   const [deployError, setDeployError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isDeploying, setIsDeploying] = useState(false);
+  const [isCancelling, setIsCancelling] = useState(false);
+  const [cancelConfirm, setCancelConfirm] = useState(false);
+  const [cancelledFeedback, setCancelledFeedback] = useState(false);
   const [assignedSignTarget, setAssignedSignTarget] = useState<AssignedSignTarget | null>(null);
   const [existingTrainingClipCount, setExistingTrainingClipCount] = useState(0);
   const [isLoadingExistingTrainingClipCount, setIsLoadingExistingTrainingClipCount] = useState(false);
@@ -369,8 +372,25 @@ export function TrainingWizard({ videoRef, cameraRef, initialAssignedSign }: Tra
     }
   };
 
+  const ACTIVE_TRAINING_STATUSES = new Set(["queued", "preprocessing", "training", "validating"]);
+  const isTrainingActive = ACTIVE_TRAINING_STATUSES.has(progressState.status);
   const trainingCompleted = progressState.status === "completed";
   const recommendation = progressState.recommended_next_action ?? "wait";
+
+  const onCancelTraining = async (): Promise<void> => {
+    if (!activeSessionId) return;
+    setIsCancelling(true);
+    setCancelConfirm(false);
+    try {
+      await stop(activeSessionId);
+      setCancelledFeedback(true);
+      resetProgress();
+    } catch {
+      setError("Impossible d'annuler l'entraînement. Réessayez.");
+    } finally {
+      setIsCancelling(false);
+    }
+  };
 
   const onDeployModel = async (): Promise<void> => {
     if (!activeSessionId) {
@@ -503,31 +523,75 @@ export function TrainingWizard({ videoRef, cameraRef, initialAssignedSign }: Tra
       {step === 3 && (
         <div className="space-y-3">
           <TrainingProgress />
-          <div className="flex gap-2">
-            <button
-              className="touch-btn bg-accent text-slate-950"
-              onClick={() => {
-                if (activeSessionId) {
-                  void stop(activeSessionId);
-                }
-              }}
-            >
-              Stop
-            </button>
-            <button
-              className="touch-btn bg-primary text-white disabled:bg-slate-700 disabled:text-slate-400"
-              disabled={!trainingCompleted}
-              onClick={() => {
-                if (trainingCompleted) {
-                  setStep(4);
-                }
-              }}
-            >
-              Validate
-            </button>
-          </div>
-          {!trainingCompleted && (
-            <p className="text-xs text-slate-400">Validation unlocks automatically when training is completed.</p>
+
+          {cancelledFeedback ? (
+            <div className="rounded-btn border border-slate-600/50 bg-slate-800/60 px-4 py-3 text-sm text-slate-300">
+              <p className="font-medium text-slate-100">⚠ Entraînement annulé</p>
+              <p className="mt-1 text-xs text-slate-400">La session a été arrêtée. Vous pouvez relancer un entraînement depuis l'étape précédente.</p>
+              <button
+                className="mt-3 touch-btn bg-slate-700 text-sm text-white"
+                onClick={() => {
+                  setCancelledFeedback(false);
+                  setStep(2);
+                }}
+              >
+                Retour à l'enregistrement
+              </button>
+            </div>
+          ) : (
+            <>
+              <div className="flex gap-2">
+                {isTrainingActive && !cancelConfirm && (
+                  <button
+                    className="touch-btn border border-red-500/60 bg-red-600/20 text-red-300 hover:bg-red-600/30 disabled:cursor-not-allowed disabled:opacity-50"
+                    disabled={isCancelling}
+                    onClick={() => setCancelConfirm(true)}
+                  >
+                    Annuler l'entraînement
+                  </button>
+                )}
+                <button
+                  className="touch-btn bg-primary text-white disabled:bg-slate-700 disabled:text-slate-400"
+                  disabled={!trainingCompleted}
+                  onClick={() => {
+                    if (trainingCompleted) {
+                      setStep(4);
+                    }
+                  }}
+                >
+                  Valider
+                </button>
+              </div>
+
+              {cancelConfirm && (
+                <div className="rounded-btn border border-red-500/40 bg-red-900/20 p-4">
+                  <p className="mb-1 text-sm font-semibold text-red-200">Confirmer l'annulation</p>
+                  <p className="mb-3 text-xs text-red-300/80">
+                    L'entraînement en cours sera interrompu. Cette action est irréversible.
+                  </p>
+                  <div className="flex gap-2">
+                    <button
+                      className="touch-btn border border-red-500 bg-red-600 text-sm text-white hover:bg-red-700 disabled:opacity-60"
+                      disabled={isCancelling}
+                      onClick={() => { void onCancelTraining(); }}
+                    >
+                      {isCancelling ? "Annulation…" : "Oui, annuler"}
+                    </button>
+                    <button
+                      className="touch-btn bg-slate-700 text-sm text-white hover:bg-slate-600"
+                      disabled={isCancelling}
+                      onClick={() => setCancelConfirm(false)}
+                    >
+                      Non, continuer
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {!trainingCompleted && !cancelConfirm && (
+                <p className="text-xs text-slate-400">La validation se débloque automatiquement à la fin de l'entraînement.</p>
+              )}
+            </>
           )}
         </div>
       )}

@@ -103,12 +103,19 @@ export function TrainingSessionPage(): JSX.Element {
     },
   });
 
+  const [isCancelling, setIsCancelling] = useState(false);
+  const [cancelConfirm, setCancelConfirm] = useState(false);
+
   const handleStop = useCallback(async () => {
     if (!sessionId) return;
+    setIsCancelling(true);
+    setCancelConfirm(false);
     try {
       await stopTraining(sessionId);
     } catch {
-      setError("Failed to stop training session.");
+      setError("Impossible d'annuler l'entraînement. Réessayez.");
+    } finally {
+      setIsCancelling(false);
     }
   }, [sessionId]);
 
@@ -164,7 +171,8 @@ export function TrainingSessionPage(): JSX.Element {
     );
   }
 
-  const isRunning = progress.status === "running" || progress.status === "queued";
+  const ACTIVE_STATUSES = new Set(["queued", "preprocessing", "training", "validating"]);
+  const isRunning = ACTIVE_STATUSES.has(progress.status);
   const isCompleted = progress.status === "completed";
   const isFailed = progress.status === "failed";
 
@@ -207,16 +215,43 @@ export function TrainingSessionPage(): JSX.Element {
 
       <TrainingProgressUI />
 
-      <div className="card flex flex-wrap gap-3 p-4">
-        {isRunning && (
+      <div className="card space-y-3 p-4">
+        {isRunning && !cancelConfirm && (
           <button
-            className="touch-btn bg-red-600 text-white hover:bg-red-500"
-            onClick={handleStop}
+            className="touch-btn border border-red-500/60 bg-red-600/20 text-red-300 hover:bg-red-600/30 disabled:cursor-not-allowed disabled:opacity-50"
+            disabled={isCancelling}
+            onClick={() => setCancelConfirm(true)}
           >
-            Stop Training
+            Annuler l'entraînement
           </button>
         )}
 
+        {cancelConfirm && (
+          <div className="rounded-btn border border-red-500/40 bg-red-900/20 p-4">
+            <p className="mb-1 text-sm font-semibold text-red-200">Confirmer l'annulation</p>
+            <p className="mb-3 text-xs text-red-300/80">
+              L'entraînement en cours sera interrompu. Cette action est irréversible.
+            </p>
+            <div className="flex gap-2">
+              <button
+                className="touch-btn border border-red-500 bg-red-600 text-sm text-white hover:bg-red-700 disabled:opacity-60"
+                disabled={isCancelling}
+                onClick={() => { void handleStop(); }}
+              >
+                {isCancelling ? "Annulation…" : "Oui, annuler"}
+              </button>
+              <button
+                className="touch-btn bg-slate-700 text-sm text-white hover:bg-slate-600"
+                disabled={isCancelling}
+                onClick={() => setCancelConfirm(false)}
+              >
+                Non, continuer
+              </button>
+            </div>
+          </div>
+        )}
+
+        <div className="flex flex-wrap gap-3">
         {isCompleted && progress.deployment_ready && (
           <button
             className="touch-btn bg-green-600 text-white hover:bg-green-500 disabled:opacity-50"
@@ -237,6 +272,7 @@ export function TrainingSessionPage(): JSX.Element {
             Start New Training
           </button>
         )}
+        </div>
       </div>
 
       <div className="card space-y-2 p-4 text-xs text-slate-400">
