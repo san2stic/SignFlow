@@ -196,6 +196,12 @@ export function TranslatePage(): JSX.Element {
     path: "/translate/stream",
     onMessage: (payload) => {
       // ---------------------------------------------------------------
+      // Guard de sécurité : ignorer tout payload null/undefined/non-objet
+      // (ex. message d'erreur serveur sans les champs StreamPayload attendus)
+      // ---------------------------------------------------------------
+      if (!payload || typeof payload !== "object") return;
+
+      // ---------------------------------------------------------------
       // Phase 5 — Gérer les messages typés (sentence_complete, new_turn…)
       // ---------------------------------------------------------------
       if (payload.type === "sentence_complete") {
@@ -281,7 +287,7 @@ export function TranslatePage(): JSX.Element {
       }
 
       const isWarmup =
-        payload.prediction === "NONE" && payload.confidence === 0 && payload.alternatives.length === 0;
+        payload.prediction === "NONE" && payload.confidence === 0 && (payload.alternatives?.length ?? 0) === 0;
       const isLowConfidence =
         !isWarmup &&
         payload.prediction !== "RECORDING" &&
