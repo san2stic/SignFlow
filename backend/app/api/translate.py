@@ -709,6 +709,7 @@ async def translate_stream(websocket: WebSocket) -> None:
             # Phase 5 — Commands from frontend (action-based messages)
             # ---------------------------------------------------------------
             action = payload.get("action")
+            msg_type = payload.get("type")
             if action is not None:
                 if action == "reset_conversation":
                     pipeline.reset()
@@ -729,6 +730,78 @@ async def translate_stream(websocket: WebSocket) -> None:
                         await websocket.send_json({"type": "grammar_mode_set", "mode": mode_value, "ok": False, "error": str(_e)})
                 else:
                     logger.debug("unknown_ws_action", action=action)
+                continue  # Don't process as landmarks frame
+
+            # ---------------------------------------------------------------
+            # Feedback correction message: {"type": "submit_feedback", ...}
+            # ---------------------------------------------------------------
+            if msg_type == "submit_feedback":
+                _fb_predicted = str(payload.get("predicted_sign", ""))
+                _fb_corrected = str(payload.get("corrected_sign", ""))
+                _fb_confidence = payload.get("confidence")
+                _fb_landmarks = payload.get("landmarks")
+                if _fb_predicted and _fb_corrected:
+
+                    def _store_feedback_sync(
+                        predicted: str,
+                        corrected: str,
+                        confidence: object,
+                        landmarks: object,
+                        session_id: str,
+                    ) -> tuple[int | None, bool]:
+                        """Run synchronous DB work in a thread to avoid blocking the event loop."""
+                        from app.database import SessionLocal as _SessionLocal
+                        from app.services.feedback_service import feedback_service as _fb_svc
+                        try:
+                            with _SessionLocal() as _db:
+                                _conf = float(confidence) if confidence is not None else None
+                                _lm = list(landmarks) if isinstance(landmarks, list) else None
+                                _corr = _fb_svc.submit_correction(
+                                    _db,
+                                    predicted_sign=predicted,
+                                    corrected_sign=corrected,
+                                    confidence=_conf,
+                                    session_id=session_id,
+                                    landmarks_data=_lm,
+                                )
+                                _triggered = _fb_svc.check_and_trigger_training(
+                                    _db, corrected_sign=corrected
+                                )
+                                return _corr.id, _triggered
+                        except Exception as _exc:  # noqa: BLE001
+                            logger.error("ws_feedback_store_failed", error=str(_exc))
+                            return None, False
+
+                    try:
+                        _fb_corr_id, _fb_triggered = await _asyncio.to_thread(
+                            _store_feedback_sync,
+                            _fb_predicted,
+                            _fb_corrected,
+                            _fb_confidence,
+                            _fb_landmarks,
+                            str(id(websocket)),
+                        )
+                        await websocket.send_json({
+                            "type": "feedback_acknowledged",
+                            "correction_id": _fb_corr_id,
+                            "training_triggered": bool(_fb_triggered),
+                        })
+                    except Exception as _exc:  # noqa: BLE001
+                        logger.error("ws_feedback_response_failed", error=str(_exc))
+                        await websocket.send_json({
+                            "type": "feedback_acknowledged",
+                            "correction_id": None,
+                            "training_triggered": False,
+                            "error": "Feedback could not be stored",
+                        })
+                else:
+                    logger.warning("ws_submit_feedback_missing_fields", payload_keys=list(payload.keys()))
+                    await websocket.send_json({
+                        "type": "feedback_acknowledged",
+                        "correction_id": None,
+                        "training_triggered": False,
+                        "error": "predicted_sign and corrected_sign are required",
+                    })
                 continue  # Don't process as landmarks frame
 
             if "hands" not in payload and "pose" not in payload:

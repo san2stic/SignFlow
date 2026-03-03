@@ -6,6 +6,7 @@ import { listSigns, type Sign } from "../api/signs";
 import { CameraFeed } from "../components/camera/CameraFeed";
 import { LandmarkOverlay } from "../components/camera/LandmarkOverlay";
 import { ConfidenceBadge } from "../components/common/ConfidenceBadge";
+import { FeedbackButton, FeedbackPopup, FeedbackToast } from "../components/feedback";
 import { ConversationPanel } from "../components/translate/ConversationPanel";
 import { SignConfidenceBar } from "../components/translate/SignConfidenceBar";
 import { useCamera } from "../hooks/useCamera";
@@ -17,6 +18,7 @@ import { speak } from "../lib/speech";
 import { useSettingsStore } from "../stores/settingsStore";
 import { useTrainingStore } from "../stores/trainingStore";
 import { useTranslateStore } from "../stores/translateStore";
+import { useFeedbackStore } from "../stores/feedbackStore";
 import type { CameraError } from "../hooks/useCamera";
 
 interface StreamPayload {
@@ -149,6 +151,9 @@ export function TranslatePage(): JSX.Element {
 
   const setPendingClip = useTrainingStore((state) => state.setPendingClip);
 
+  // Feedback store — pour traiter les acknowledgements WebSocket
+  const handleFeedbackAcknowledgement = useFeedbackStore((state) => state.handleAcknowledgement);
+
   const [showUnknownPrompt, setShowUnknownPrompt] = useState(false);
   const [promptCooldown, setPromptCooldown] = useState(false);
   const [cooldownSeconds, setCooldownSeconds] = useState(0);
@@ -229,6 +234,15 @@ export function TranslatePage(): JSX.Element {
         if (payload.type === "grammar_mode_set" && (payload as { mode?: string }).mode) {
           setGrammarMode((payload as { mode?: string }).mode ?? "rules");
         }
+        return;
+      }
+
+      if (payload.type === "feedback_acknowledged") {
+        const ack = payload as unknown as {
+          correction_id: number;
+          training_triggered: boolean;
+        };
+        handleFeedbackAcknowledgement(ack.correction_id, ack.training_triggered);
         return;
       }
 
@@ -635,16 +649,24 @@ export function TranslatePage(): JSX.Element {
         <div className="relative z-10 flex items-center justify-between gap-6">
           <div className="flex-1">
             <p className="mb-2 text-xs font-medium uppercase tracking-wider text-text-tertiary">Signe détecté</p>
-            <motion.p
-              key={displayedPrediction}
-              initial={{ opacity: 0, y: 10 }}
-              animate={{ opacity: 1, y: 0 }}
-              className="font-display text-4xl font-bold tracking-tight"
-            >
-              <span className={displayedPrediction !== "NONE" ? "glow-text bg-gradient-to-r from-primary to-secondary bg-clip-text text-transparent" : "text-text-muted"}>
-                {displayedPrediction}
-              </span>
-            </motion.p>
+            <div className="flex items-center gap-3">
+              <motion.p
+                key={displayedPrediction}
+                initial={{ opacity: 0, y: 10 }}
+                animate={{ opacity: 1, y: 0 }}
+                className="font-display text-4xl font-bold tracking-tight"
+              >
+                <span className={displayedPrediction !== "NONE" ? "glow-text bg-gradient-to-r from-primary to-secondary bg-clip-text text-transparent" : "text-text-muted"}>
+                  {displayedPrediction}
+                </span>
+              </motion.p>
+              {/* Bouton de correction — visible uniquement quand une prédiction est affichée */}
+              <FeedbackButton
+                predictedSign={displayedPredictionRaw}
+                confidence={displayedConfidence}
+                landmarks={null}
+              />
+            </div>
             {/* Barre de confiance temps réel */}
             <SignConfidenceBar
               confidence={displayedConfidence}
@@ -908,6 +930,12 @@ export function TranslatePage(): JSX.Element {
           </motion.div>
         </motion.div>
       )}
+
+      {/* ------------------------------------------------------------------ */}
+      {/* Feedback correction — popup + toast globaux                          */}
+      {/* ------------------------------------------------------------------ */}
+      <FeedbackPopup sendViaWs={(msg) => ws.send(msg as LandmarkFrame)} />
+      <FeedbackToast />
     </section>
   );
 }

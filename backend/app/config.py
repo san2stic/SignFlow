@@ -105,6 +105,11 @@ class Settings(BaseSettings):
     jwt_algorithm: str = "HS256"
     jwt_access_token_expire_minutes: int = Field(default=10080, ge=1, le=525600)  # 7 days default
 
+    # ── Feedback / Correction System ─────────────────────────────────────────
+    feedback_enabled: bool = True
+    feedback_training_trigger_count: int = Field(default=5, ge=1, le=1000)
+    feedback_landmarks_dir: str = "backend/data/feedback"
+
     # ── Auto-Update System ────────────────────────────────────────────────────
     # Disabled by default to avoid breaking existing deployments.
     # Set UPDATER_ENABLED=true in .env to activate the polling loop.
