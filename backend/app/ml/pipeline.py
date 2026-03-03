@@ -1057,6 +1057,23 @@ class SignFlowInferencePipeline:
             threshold=effective_threshold,
         )
 
+        # --- DIAGNOSTIC LOG: expose threshold decisions and final outcome ---
+        logger.info(
+            "DIAG_build_prediction_response",
+            prediction_before_filters=normalized_label,
+            confidence_before_filters=round(normalized_confidence, 4),
+            adaptive_threshold=round(float(adaptive_threshold), 4),
+            effective_threshold=round(float(effective_threshold), 4),
+            base_confidence_threshold=round(float(self.confidence_threshold), 4),
+            filtered_label=filtered_label,
+            filtered_confidence=round(filtered_confidence, 4),
+            is_accepted=filtered_label != "NONE" and filtered_confidence >= effective_threshold,
+            frame_buffer_len=len(self.frame_buffer),
+            recording_frames=self._recording_frame_count,
+            num_labels=len(self.labels),
+        )
+        # --- END DIAGNOSTIC ---
+
         decision_trace = {
             "prediction_before_filters": self._last_decision_trace,
             "adaptive_threshold": round(float(adaptive_threshold), 4),
@@ -1175,6 +1192,23 @@ class SignFlowInferencePipeline:
         try:
             probs, view_disagreement = self._infer_probabilities(window)
             self._decision_counters["total_inferences"] += 1
+
+            # --- DIAGNOSTIC LOG: expose class distribution to identify "always bonjour" bug ---
+            num_model_classes = len(probs)
+            logger.info(
+                "DIAG_infer_window_probs",
+                num_model_classes=num_model_classes,
+                num_labels=len(self.labels),
+                labels=list(self.labels),
+                all_probs={
+                    self.labels[i] if i < len(self.labels) else f"class_{i}": round(float(probs[i]), 4)
+                    for i in range(len(probs))
+                },
+                top1_label=self.labels[int(np.argmax(probs))] if len(probs) > 0 and len(self.labels) > 0 else "?",
+                top1_prob=round(float(np.max(probs)), 4) if len(probs) > 0 else 0.0,
+                prob_entropy=round(float(-np.sum(probs * np.log(np.clip(probs, 1e-9, 1.0)))), 4) if len(probs) > 0 else 0.0,
+            )
+            # --- END DIAGNOSTIC ---
 
             # Get top predictions
             top_k = min(4, len(probs))  # Get top 4 predictions
