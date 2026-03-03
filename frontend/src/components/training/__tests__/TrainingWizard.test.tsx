@@ -1,6 +1,7 @@
 import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { createRef } from "react";
+import { MemoryRouter } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { createSign, listSignVideos, uploadSignVideo } from "../../../api/signs";
@@ -119,7 +120,7 @@ describe("TrainingWizard", () => {
   it("keeps Validate disabled until training session is completed", async () => {
     const user = userEvent.setup();
 
-    render(<TrainingWizard videoRef={createRef<HTMLVideoElement>()} />);
+    render(<MemoryRouter><TrainingWizard videoRef={createRef<HTMLVideoElement>()} /></MemoryRouter>);
 
     await user.type(screen.getByLabelText("Sign Name"), "Bonjour");
     await user.click(screen.getByRole("button", { name: "Next" }));
@@ -162,7 +163,7 @@ describe("TrainingWizard", () => {
       }
     });
 
-    render(<TrainingWizard videoRef={createRef<HTMLVideoElement>()} />);
+    render(<MemoryRouter><TrainingWizard videoRef={createRef<HTMLVideoElement>()} /></MemoryRouter>);
 
     expect(await screen.findByText("Fine-tuning target: lsfb_bonjour")).toBeInTheDocument();
 
@@ -200,10 +201,12 @@ describe("TrainingWizard", () => {
     ]);
 
     render(
-      <TrainingWizard
-        videoRef={createRef<HTMLVideoElement>()}
-        initialAssignedSign={{ id: "existing-sign-77", name: "lsfb_merci", trainingSampleCount: 1 }}
-      />
+      <MemoryRouter>
+        <TrainingWizard
+          videoRef={createRef<HTMLVideoElement>()}
+          initialAssignedSign={{ id: "existing-sign-77", name: "lsfb_merci", trainingSampleCount: 1 }}
+        />
+      </MemoryRouter>
     );
 
     await user.click(screen.getByRole("button", { name: "Next" }));
@@ -224,7 +227,7 @@ describe("TrainingWizard", () => {
   it("shows backend failure reason from live payload", async () => {
     const user = userEvent.setup();
 
-    render(<TrainingWizard videoRef={createRef<HTMLVideoElement>()} />);
+    render(<MemoryRouter><TrainingWizard videoRef={createRef<HTMLVideoElement>()} /></MemoryRouter>);
 
     await user.type(screen.getByLabelText("Sign Name"), "Bonjour");
     await user.click(screen.getByRole("button", { name: "Next" }));

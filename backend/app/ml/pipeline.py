@@ -59,11 +59,11 @@ class SignFlowInferencePipeline:
         model_path: str | Path | None = None,
         model_version: str | None = None,
         seq_len: int = 64,
-        confidence_threshold: float = 0.7,
+        confidence_threshold: float = 0.55,
         smoothing_window: int = 5,
-        min_hand_visibility: float = 0.2,
-        min_prediction_margin: float = 0.1,
-        min_motion_energy: float = 0.003,
+        min_hand_visibility: float = 0.15,
+        min_prediction_margin: float = 0.05,
+        min_motion_energy: float = 0.002,
         device: str = "cpu",
         max_buffer_frames: int = 180,
         rest_frames_threshold: int = 10,
@@ -969,14 +969,14 @@ class SignFlowInferencePipeline:
         """
         threshold = self.confidence_threshold
         if self._mean_hand_visibility() < max(0.3, self.min_hand_visibility + 0.05):
-            threshold += 0.05
+            threshold += 0.03
         if self._mean_motion_energy() < self.min_motion_energy:
-            threshold += 0.06
-        if self._latest_frontend_confidence < self.frontend_confidence_floor:
-            threshold += 0.08
-        elif self._latest_frontend_confidence < 0.55:
             threshold += 0.04
-        return float(min(0.95, threshold))
+        if self._latest_frontend_confidence < self.frontend_confidence_floor:
+            threshold += 0.05
+        elif self._latest_frontend_confidence < 0.55:
+            threshold += 0.02
+        return float(min(0.92, threshold))
 
     def _threshold_for_label(self, label: str) -> float:
         """Return class-specific confidence threshold when available."""
@@ -1122,9 +1122,9 @@ class SignFlowInferencePipeline:
             self._current_motion_energy / max(self.min_motion_energy, 1e-6), 0.0, 1.0
         )
         calibrated = (
-            (0.58 * raw_confidence)
-            + (0.24 * margin)
-            + (0.10 * certainty)
+            (0.50 * raw_confidence)
+            + (0.30 * margin)
+            + (0.12 * certainty)
             + (0.08 * motion_factor)
         )
         if margin < self.min_prediction_margin:

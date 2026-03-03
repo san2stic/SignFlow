@@ -19,6 +19,10 @@ const TrainPage = lazy(async () => {
   const module = await import("./pages/TrainPage");
   return { default: module.TrainPage };
 });
+const TrainingSessionPage = lazy(async () => {
+  const module = await import("./pages/TrainingSessionPage");
+  return { default: module.TrainingSessionPage };
+});
 const SettingsPage = lazy(async () => {
   const module = await import("./pages/SettingsPage");
   return { default: module.SettingsPage };
@@ -81,6 +85,7 @@ export const router = createBrowserRouter([
       { path: "translate", element: withSuspense(<TranslatePage />) },
       { path: "dictionary", element: withSuspense(<DictionaryPage />) },
       { path: "training", element: withSuspense(<TrainPage />) },
+      { path: "training/:sessionId", element: withSuspense(<TrainingSessionPage />) },
       { path: "train", element: withSuspense(<TrainPage />) },
       { path: "settings", element: withSuspense(<SettingsPage />) },
       { path: "profile", element: withSuspense(<Profile />) },

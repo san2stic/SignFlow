@@ -60,10 +60,10 @@ class DistillationTrainer:
 def build_student_model(
     teacher_model: SignTransformer,
     *,
-    d_model: int = 192,
-    num_layers: int = 4,
-    nhead: int = 6,
-    dim_feedforward: int = 768,
+    d_model: int = 256,
+    num_layers: int = 6,
+    nhead: int = 8,
+    dim_feedforward: int = 1024,
 ) -> SignTransformer:
     """Build a compact student initialized from teacher topology metadata."""
     student = SignTransformer(

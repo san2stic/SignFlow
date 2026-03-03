@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState, type Ref, type RefObject } from "react";
+import { useNavigate } from "react-router-dom";
 
 import {
   createSign,
@@ -66,6 +67,7 @@ function normalizeSignName(rawName: string): string {
 }
 
 export function TrainingWizard({ videoRef, cameraRef, initialAssignedSign }: TrainingWizardProps): JSX.Element {
+  const navigate = useNavigate();
   const [step, setStep] = useState(1);
   const [name, setName] = useState("");
   const [category, setCategory] = useState("lsfb-v1");
@@ -357,7 +359,8 @@ export function TrainingWizard({ videoRef, cameraRef, initialAssignedSign }: Tra
       }
 
       resetProgress();
-      await startFewShot(sign.id, 0.85);
+      const session = await startFewShot(sign.id, 0.85);
+      navigate(`/training/${session.id}`);
       setStep(3);
     } catch (trainingError) {
       setError(trainingError instanceof Error ? trainingError.message : "Failed to start training.");

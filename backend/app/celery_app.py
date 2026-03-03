@@ -14,4 +14,8 @@ celery_app.conf.update(
         "app.tasks.training.run_training_session": {"queue": "training"},
     },
     include=["app.tasks.training_tasks"],
+    worker_concurrency=settings.training_celery_concurrency,
+    worker_prefetch_multiplier=1,
+    task_acks_late=True,
+    task_reject_on_worker_lost=True,
 )

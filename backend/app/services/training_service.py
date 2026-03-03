@@ -2411,7 +2411,7 @@ class TrainingService:
                         checkpoint_path=active_checkpoint,
                         num_features=num_features,
                         num_classes=num_classes,
-                        d_model=192,
+                        d_model=256,
                         device=device,
                         freeze_until_layer=fs_freeze,
                         cosine_head_weight=fs_cosine_weight,
