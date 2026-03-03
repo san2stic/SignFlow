@@ -83,7 +83,7 @@ services:
 
   celery_worker:
     build: ./backend
-    command: celery -A app.celery_app worker -l info -Q training
+    command: celery -A app.celery_app worker -l info -Q training --concurrency=${TRAINING_CELERY_CONCURRENCY:-2} --prefetch-multiplier=1
     shm_size: "2gb"
     volumes:
       - ./backend/data:/app/data

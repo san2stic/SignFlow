@@ -33,3 +33,4 @@ backend/data/exports/**
 # IDE
 .vscode/
 .idea/
+backend/data/models/mlruns/

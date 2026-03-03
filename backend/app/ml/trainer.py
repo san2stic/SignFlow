@@ -34,33 +34,33 @@ logger = structlog.get_logger(__name__)
 class TrainingConfig:
     """Configuration for training."""
 
-    num_epochs: int = 50
-    learning_rate: float = 1e-4
+    num_epochs: int = 80
+    learning_rate: float = 2e-4
     batch_size: int = 32
     num_workers: int = 2
     device: str = "cpu"  # "cpu" or "cuda" or "mps"
     sequence_length: int = 64
-    early_stopping_patience: int = 15       # was 10
-    early_stopping_min_delta: float = 1e-4
+    early_stopping_patience: int = 20
+    early_stopping_min_delta: float = 5e-5
     gradient_clip_max_norm: float = 1.0
     gradient_accumulation_steps: int = 1
     temporal_mask_prob: float = 0.15
     temporal_mask_span_ratio: float = 0.2
 
-    weight_decay: float = 0.05              # was 0.01
+    weight_decay: float = 0.05
     classifier_lr_multiplier: float = 2.0
-    label_smoothing: float = 0.1            # was 0.05
+    label_smoothing: float = 0.1
 
-    use_focal_loss: bool = False  # Useful for few-shot learning
+    use_focal_loss: bool = True
     focal_loss_gamma: float = 2.0
     focal_loss_alpha: float = 0.25
 
-    warmup_epochs: int = 3                  # was 5
+    warmup_epochs: int = 5
     use_class_weights: bool = True
     use_weighted_sampler: bool = True
 
-    use_mixup: bool = True                  # was False
-    mixup_alpha: float = 0.3               # was 0.2
+    use_mixup: bool = True
+    mixup_alpha: float = 0.3
 
     use_ema: bool = True
     ema_decay: float = 0.995
@@ -1253,10 +1253,10 @@ class SignTrainer:
             "d_model": self.model.d_model,
             "nhead": self.model.nhead,
             "num_layers": self.model.num_layers,
-            "dim_feedforward": getattr(self.model, "dim_feedforward", 768),
-            "dropout": getattr(self.model, "dropout", 0.2),
-            "feature_dropout": getattr(self.model, "feature_dropout", 0.15),
-            "pooling_dropout": getattr(self.model, "pooling_dropout_value", 0.2),
+            "dim_feedforward": getattr(self.model, "dim_feedforward", 1024),
+            "dropout": getattr(self.model, "dropout", 0.15),
+            "feature_dropout": getattr(self.model, "feature_dropout", 0.1),
+            "pooling_dropout": getattr(self.model, "pooling_dropout_value", 0.15),
             "use_cls_token": getattr(self.model, "use_cls_token", True),
             "token_dropout": getattr(self.model, "token_dropout", 0.0),
             "temporal_smoothing": getattr(self.model, "temporal_smoothing", 0.0),
@@ -1373,13 +1373,13 @@ def load_model_checkpoint(checkpoint_path: str | Path, device: str = "cpu") -> S
         model = SignTransformer(
             num_features=checkpoint.get("num_features", 225),
             num_classes=checkpoint["num_classes"],
-            d_model=checkpoint.get("d_model", 192),
-            nhead=checkpoint.get("nhead", 6),
-            num_layers=checkpoint.get("num_layers", 4),
-            dim_feedforward=checkpoint.get("dim_feedforward", 768),
-            dropout=checkpoint.get("dropout", 0.2),
-            feature_dropout=checkpoint.get("feature_dropout", 0.15),
-            pooling_dropout=checkpoint.get("pooling_dropout", 0.2),
+            d_model=checkpoint.get("d_model", 256),
+            nhead=checkpoint.get("nhead", 8),
+            num_layers=checkpoint.get("num_layers", 6),
+            dim_feedforward=checkpoint.get("dim_feedforward", 1024),
+            dropout=checkpoint.get("dropout", 0.15),
+            feature_dropout=checkpoint.get("feature_dropout", 0.1),
+            pooling_dropout=checkpoint.get("pooling_dropout", 0.15),
             use_cls_token=checkpoint.get("use_cls_token", True),
             token_dropout=checkpoint.get("token_dropout", 0.0),
             temporal_smoothing=checkpoint.get("temporal_smoothing", 0.0),
