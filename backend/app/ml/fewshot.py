@@ -104,6 +104,7 @@ def prepare_few_shot_model(
     device: str = "cpu",
     freeze_until_layer: int = 1,
     freeze_embedding: bool = True,
+    cosine_head_weight: float | None = None,
 ) -> FewShotPreparation:
     """
     Build model for few-shot training from active checkpoint or fresh initialization.
@@ -132,7 +133,11 @@ def prepare_few_shot_model(
             use_multiscale_stem=checkpoint.get("use_multiscale_stem", True),
             use_cosine_head=checkpoint.get("use_cosine_head", True),
             relative_bias_max_distance=checkpoint.get("relative_bias_max_distance", 64),
-            cosine_head_weight=checkpoint.get("cosine_head_weight", 0.35),
+            cosine_head_weight=(
+                cosine_head_weight
+                if cosine_head_weight is not None
+                else checkpoint.get("cosine_head_weight", 0.35)
+            ),
         )
         try:
             model.load_state_dict(checkpoint["model_state_dict"], strict=True)
@@ -156,6 +161,7 @@ def prepare_few_shot_model(
             pooling_dropout=0.2,
             use_multiscale_stem=True,
             use_cosine_head=True,
+            cosine_head_weight=cosine_head_weight if cosine_head_weight is not None else 0.35,
         )
 
     # Enable gradients for training (checkpoint may come from inference mode).

@@ -99,8 +99,8 @@ def test_resolve_augmentation_policy_defaults_for_few_shot_low_samples() -> None
         target_class_samples=6,
     )
 
-    assert num_aug == 16
-    assert probability == 0.70
+    assert num_aug == 24
+    assert probability == 0.80
     assert max_samples == 12000
 
 

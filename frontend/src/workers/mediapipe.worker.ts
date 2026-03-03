@@ -7,7 +7,15 @@
  * - Parallel processing with rendering
  */
 
-import { Holistic, Results } from "@mediapipe/holistic";
+// @ts-expect-error -- CJS default export, not proper ESM named exports
+import holisticModule from "@mediapipe/holistic";
+const Holistic = holisticModule.Holistic ?? holisticModule;
+type Results = {
+  leftHandLandmarks?: { x: number; y: number; z: number }[];
+  rightHandLandmarks?: { x: number; y: number; z: number }[];
+  poseLandmarks?: { x: number; y: number; z: number }[];
+  faceLandmarks?: { x: number; y: number; z: number }[];
+};
 
 interface WorkerConfig {
   modelComplexity: 0 | 1 | 2;

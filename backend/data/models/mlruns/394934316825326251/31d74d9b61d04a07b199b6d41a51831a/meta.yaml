@@ -1,0 +1,14 @@
+artifact_uri: file:///Users/bastienjavaux/Library/Mobile Documents/com~apple~CloudDocs/SignFlow/backend/data/models/mlruns/394934316825326251/31d74d9b61d04a07b199b6d41a51831a/artifacts
+end_time: 1772501385121
+entry_point_name: ''
+experiment_id: '394934316825326251'
+lifecycle_stage: active
+run_id: 31d74d9b61d04a07b199b6d41a51831a
+run_name: capable-auk-759
+source_name: ''
+source_type: 4
+source_version: ''
+start_time: 1772501382427
+status: 3
+tags: []
+user_id: signflow

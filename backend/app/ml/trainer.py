@@ -400,6 +400,25 @@ class SignTrainer:
                 label_smoothing=self.config.label_smoothing,
             )
 
+    @staticmethod
+    def _safe_num_workers(requested: int) -> int:
+        """Return *requested* workers unless /dev/shm is too small (Docker default 64 MB)."""
+        if requested <= 0:
+            return 0
+        try:
+            import shutil
+            shm_total_mb = shutil.disk_usage("/dev/shm").total / (1024 * 1024)
+            if shm_total_mb < 128:
+                logger.warning(
+                    "small_shm_detected",
+                    shm_total_mb=round(shm_total_mb, 1),
+                    msg="Forcing num_workers=0 to avoid shared memory allocation errors",
+                )
+                return 0
+        except (OSError, AttributeError):
+            pass
+        return requested
+
     def _build_train_loader(self, train_dataset: Dataset) -> DataLoader:
         """Build training dataloader with optional class-balanced sampler."""
         sampler = None
@@ -427,14 +446,15 @@ class SignTrainer:
                 )
                 shuffle = False
 
+        workers = self._safe_num_workers(self.config.num_workers)
         return DataLoader(
             train_dataset,
             batch_size=self.config.batch_size,
             shuffle=shuffle,
             sampler=sampler,
-            num_workers=self.config.num_workers,
+            num_workers=workers,
             pin_memory=self.device.type == "cuda",
-            persistent_workers=self.config.num_workers > 0,
+            persistent_workers=workers > 0,
         )
 
     def _mixup_batch(
@@ -973,13 +993,14 @@ class SignTrainer:
 
         # Create dataloaders
         full_train_loader = self._build_train_loader(train_dataset)
+        val_workers = self._safe_num_workers(self.config.num_workers)
         val_loader = DataLoader(
             val_dataset,
             batch_size=self.config.batch_size,
             shuffle=False,
-            num_workers=self.config.num_workers,
+            num_workers=val_workers,
             pin_memory=self.device.type == "cuda",
-            persistent_workers=self.config.num_workers > 0,
+            persistent_workers=val_workers > 0,
         )
         curriculum_sampler: CurriculumSampler | None = None
         if self.config.use_curriculum and len(train_dataset) > 0:

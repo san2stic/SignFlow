@@ -19,7 +19,7 @@ export default defineConfig({
     plugins: () => [react()],
   },
   optimizeDeps: {
-    exclude: ["@mediapipe/holistic"], // Let MediaPipe load from CDN
+    include: ["@mediapipe/drawing_utils"],
   },
   server: {
     host: true,

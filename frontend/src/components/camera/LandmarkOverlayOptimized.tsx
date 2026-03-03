@@ -9,7 +9,7 @@
 
 import { useEffect, useRef, type RefObject } from "react";
 import { drawConnectors, drawLandmarks } from "@mediapipe/drawing_utils";
-import { HAND_CONNECTIONS, POSE_CONNECTIONS } from "@mediapipe/holistic";
+import { HAND_CONNECTIONS, POSE_CONNECTIONS } from "../../lib/mediapipe-constants";
 
 import type { LandmarkFrame } from "../../lib/mediapipe-optimized";
 

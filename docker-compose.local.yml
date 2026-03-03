@@ -1,0 +1,40 @@
+# docker-compose override for lightweight local Mac development.
+# Usage: docker compose -f docker-compose.yml -f docker-compose.local.yml up --build
+#
+# Runs only backend + frontend + db (3 containers).
+# Disables Elasticsearch, Celery, MLflow, TorchServe.
+# Training runs synchronously in-process (no Redis/Celery needed).
+
+services:
+  backend:
+    environment:
+      - SEARCH_BACKEND=sql
+      - TRAINING_USE_CELERY=false
+      - ELASTICSEARCH_FAIL_OPEN=true
+      - USE_TORCHSERVE=false
+      - MLFLOW_REGISTRY_ENABLED=false
+      - CORS_ORIGINS=http://localhost:3000,http://127.0.0.1:3000
+      - REDIS_URL=
+    depends_on:
+      db:
+        condition: service_started
+
+  redis:
+    deploy:
+      replicas: 0
+
+  elasticsearch:
+    deploy:
+      replicas: 0
+
+  celery_worker:
+    deploy:
+      replicas: 0
+
+  mlflow:
+    deploy:
+      replicas: 0
+
+  torchserve:
+    deploy:
+      replicas: 0

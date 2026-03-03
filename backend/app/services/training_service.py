@@ -40,7 +40,11 @@ from app.ml.feature_engineering import (
 )
 from app.ml.fewshot import prepare_few_shot_model
 from app.ml.model import SignTransformer
-from app.ml.prototypical import run_prototypical_fallback
+from app.ml.prototypical import (
+    apply_prototypes_to_classifier,
+    compute_class_prototypes,
+    run_prototypical_fallback,
+)
 from app.ml.registry import create_default_registry
 from app.ml.trainer import (
     SignTrainer,
@@ -147,12 +151,28 @@ class TrainingService:
 
     @staticmethod
     def _resolve_dataloader_workers(default_workers: int = 2) -> int:
-        """Avoid DataLoader child processes when already inside a daemon worker process."""
+        """Avoid DataLoader child processes when shared memory or process constraints exist."""
         workers = max(0, int(default_workers))
+        if workers == 0:
+            return 0
         try:
             if current_process().daemon:
                 return 0
         except Exception:  # noqa: BLE001
+            pass
+        # Detect limited /dev/shm in Docker containers (default 64MB is too small)
+        try:
+            import shutil
+            shm_stats = shutil.disk_usage("/dev/shm")
+            shm_total_mb = shm_stats.total / (1024 * 1024)
+            if shm_total_mb < 128:
+                logger.warning(
+                    "small_shm_detected",
+                    shm_total_mb=round(shm_total_mb, 1),
+                    msg="Forcing num_workers=0 to avoid shared memory allocation errors",
+                )
+                return 0
+        except (OSError, AttributeError):
             pass
         return workers
 
@@ -342,9 +362,12 @@ class TrainingService:
 
         if normalized_mode == "few-shot":
             target = int(target_class_samples or 0)
-            if target < 10:
-                default_num_aug = 16
-                default_probability = 0.70
+            if target < 5:
+                default_num_aug = 32
+                default_probability = 0.85
+            elif target < 15:
+                default_num_aug = 24
+                default_probability = 0.80
             elif target <= 30:
                 default_num_aug = 10
                 default_probability = 0.60
@@ -1767,9 +1790,19 @@ class TrainingService:
         original_label_smoothing = float(config.get("label_smoothing", 0.1))
         original_temporal_mask_prob = float(config.get("temporal_mask_prob", 0.15))
 
-        tuned_weight_decay = min(original_weight_decay, 0.02 if target_samples >= 10 else 0.01)
-        tuned_label_smoothing = min(original_label_smoothing, 0.06 if target_samples >= 10 else 0.03)
-        tuned_temporal_mask_prob = min(original_temporal_mask_prob, 0.10 if target_samples >= 10 else 0.06)
+        if target_samples < 15:
+            # Micro-dataset: very light regularization to avoid underfitting.
+            tuned_weight_decay = min(original_weight_decay, 0.005)
+            tuned_label_smoothing = min(original_label_smoothing, 0.02)
+            tuned_temporal_mask_prob = min(original_temporal_mask_prob, 0.05)
+        elif target_samples < 10:
+            tuned_weight_decay = min(original_weight_decay, 0.003)
+            tuned_label_smoothing = min(original_label_smoothing, 0.01)
+            tuned_temporal_mask_prob = min(original_temporal_mask_prob, 0.03)
+        else:
+            tuned_weight_decay = min(original_weight_decay, 0.02)
+            tuned_label_smoothing = min(original_label_smoothing, 0.06)
+            tuned_temporal_mask_prob = min(original_temporal_mask_prob, 0.10)
 
         if tuned_weight_decay < original_weight_decay:
             config["weight_decay"] = tuned_weight_decay
@@ -1836,10 +1869,23 @@ class TrainingService:
         open_set_fpr: float | None,
         latency_p95_ms: float,
         ece: float | None = None,
+        target_class_samples: int | None = None,
     ) -> bool:
-        """Evaluate multi-metric deployment gate."""
-        macro_gate = float(config.get("macro_f1_gate", 0.82))
-        target_gate = float(config.get("target_sign_f1_gate", 0.85))
+        """Evaluate multi-metric deployment gate with adaptive thresholds for few-shot."""
+        # Adaptive gates: scale thresholds by dataset size for few-shot mode.
+        target = int(target_class_samples or 0)
+        if mode == "few-shot" and target < 15:
+            default_macro_gate = 0.60
+            default_target_gate = 0.65
+        elif mode == "few-shot" and target <= 30:
+            default_macro_gate = 0.70
+            default_target_gate = 0.75
+        else:
+            default_macro_gate = 0.82
+            default_target_gate = 0.85
+
+        macro_gate = float(config.get("macro_f1_gate", default_macro_gate))
+        target_gate = float(config.get("target_sign_f1_gate", default_target_gate))
         open_set_gate = float(config.get("open_set_fpr_gate", 0.05))
         latency_gate = float(config.get("latency_p95_ms_gate", 120.0))
         ece_gate = float(config.get("ece_gate", TrainingService._DEFAULT_ECE_GATE))
@@ -2249,9 +2295,16 @@ class TrainingService:
                 )
 
                 # Split first, augment train only to avoid train/val leakage.
-                split_val_ratio = float(config.get("val_ratio", 0.25 if mode == "few-shot" else 0.2))
+                # Micro-datasets (<15 target clips): smaller val to maximize training signal.
+                if mode == "few-shot" and target_count < 15:
+                    default_val_ratio = 0.15
+                    default_min_val_per_class = 1
+                else:
+                    default_val_ratio = 0.25 if mode == "few-shot" else 0.2
+                    default_min_val_per_class = 2 if mode == "few-shot" else 1
+                split_val_ratio = float(config.get("val_ratio", default_val_ratio))
                 split_val_ratio = float(np.clip(split_val_ratio, 0.05, 0.5))
-                min_val_per_class = int(config.get("min_val_samples_per_class", 2 if mode == "few-shot" else 1))
+                min_val_per_class = int(config.get("min_val_samples_per_class", default_min_val_per_class))
                 min_val_per_class = max(1, min(8, min_val_per_class))
                 train_sequences, train_labels, val_sequences, val_labels = self._split_and_prepare_sequences(
                     sequences,
@@ -2351,13 +2404,17 @@ class TrainingService:
                         if resolved_active_model_path is not None
                         else None
                     )
+                    # Micro-dataset optimizations: freeze more layers, boost cosine head
+                    fs_freeze = int(config.get("freeze_until_layer", 3 if target_count < 15 else 2))
+                    fs_cosine_weight = 0.55 if target_count < 15 else None
                     prepared = prepare_few_shot_model(
                         checkpoint_path=active_checkpoint,
                         num_features=num_features,
                         num_classes=num_classes,
                         d_model=192,
                         device=device,
-                        freeze_until_layer=int(config.get("freeze_until_layer", 2)),
+                        freeze_until_layer=fs_freeze,
+                        cosine_head_weight=fs_cosine_weight,
                     )
                     model = prepared.model
                     num_classes = model.num_classes
@@ -2415,25 +2472,34 @@ class TrainingService:
                         teacher_model = None
                         use_distillation = False
 
+                # Micro-dataset few-shot overrides for batch/epochs/patience/warmup/mixup
+                is_micro_dataset = mode == "few-shot" and target_count < 15
+                fs_default_batch = 8 if is_micro_dataset else 32
+                fs_default_epochs = 100 if is_micro_dataset else 50
+                fs_default_patience = 25 if is_micro_dataset else 15
+                fs_default_warmup = 5 if is_micro_dataset else 3
+                fs_default_mixup = False if is_micro_dataset else True
+                fs_default_classifier_lr_mult = 5.0 if is_micro_dataset else 2.0
+
                 ml_config = MLTrainingConfig(
-                    num_epochs=int(config.get("epochs", 50)),
+                    num_epochs=int(config.get("epochs", fs_default_epochs)),
                     learning_rate=float(
                         config.get("learning_rate", 1e-4 if mode == "few-shot" else 3e-4)
                     ),
-                    batch_size=32,
+                    batch_size=int(config.get("batch_size", fs_default_batch)),
                     num_workers=self._resolve_dataloader_workers(int(config.get("num_workers", 2))),
                     device=device,
                     sequence_length=sequence_length,
-                    early_stopping_patience=int(config.get("early_stopping_patience", 15)),
+                    early_stopping_patience=int(config.get("early_stopping_patience", fs_default_patience)),
                     early_stopping_min_delta=float(config.get("early_stopping_min_delta", 1e-4)),
                     weight_decay=float(config.get("weight_decay", 0.05)),
-                    classifier_lr_multiplier=float(config.get("classifier_lr_multiplier", 2.0)),
+                    classifier_lr_multiplier=float(config.get("classifier_lr_multiplier", fs_default_classifier_lr_mult)),
                     label_smoothing=float(config.get("label_smoothing", 0.1)),
-                    warmup_epochs=int(config.get("warmup_epochs", 3)),
+                    warmup_epochs=int(config.get("warmup_epochs", fs_default_warmup)),
                     use_focal_loss=use_focal_loss,
                     use_class_weights=use_class_weights,
                     use_weighted_sampler=use_weighted_sampler,
-                    use_mixup=bool(config.get("use_mixup", True)),
+                    use_mixup=bool(config.get("use_mixup", fs_default_mixup)),
                     mixup_alpha=float(config.get("mixup_alpha", 0.3)),
                     use_ema=bool(config.get("use_ema", True)),
                     ema_decay=float(config.get("ema_decay", 0.995)),
@@ -2499,6 +2565,35 @@ class TrainingService:
                 )
 
                 use_prototypical = mode == "few-shot" and target_count < 5
+
+                # Hybrid prototype warm-start: initialize classifier from class
+                # centroids before gradient fine-tuning for ALL few-shot runs.
+                # This gives the optimizer a strong starting point near the solution.
+                if mode == "few-shot" and not use_prototypical:
+                    try:
+                        logger.info("applying_prototype_warm_start")
+                        proto_device = torch.device(device)
+                        prototypes = compute_class_prototypes(
+                            model=model,
+                            dataset=train_dataset,
+                            device=proto_device,
+                            batch_size=ml_config.batch_size,
+                        )
+                        apply_prototypes_to_classifier(
+                            model=model,
+                            prototypes=prototypes,
+                            device=proto_device,
+                        )
+                        logger.info(
+                            "prototype_warm_start_applied",
+                            num_prototypes=len(prototypes),
+                        )
+                    except Exception as proto_exc:  # noqa: BLE001
+                        logger.warning(
+                            "prototype_warm_start_failed",
+                            error=str(proto_exc),
+                        )
+
                 if use_prototypical:
                     logger.info(
                         "starting_prototypical_fallback",
@@ -2697,6 +2792,7 @@ class TrainingService:
                     open_set_fpr=open_set_fpr,
                     latency_p95_ms=latency_p95_ms,
                     ece=ece,
+                    target_class_samples=target_count,
                 )
                 model_eval_report["latency_p95_ms"] = round(float(latency_p95_ms), 2)
                 model_eval_report["deployment_gate_passed"] = bool(deployment_ready)

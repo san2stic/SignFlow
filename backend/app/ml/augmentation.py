@@ -141,6 +141,49 @@ def temporal_crop(sequence: np.ndarray, min_ratio: float = 0.7) -> np.ndarray:
     return temporal_resample(cropped, target_len=num_frames)
 
 
+def scale_variation(sequence: np.ndarray, min_scale: float = 0.85, max_scale: float = 1.15) -> np.ndarray:
+    """Randomly scale all landmark coordinates to simulate camera distance changes."""
+    if len(sequence) == 0:
+        return sequence
+    scale = np.random.uniform(min_scale, max_scale)
+    scaled = sequence.copy()
+    scaled *= scale
+    return scaled
+
+
+def rotation_2d(sequence: np.ndarray, max_angle: float = 10.0) -> np.ndarray:
+    """Apply a small 2D rotation on the x/y plane to simulate head/body tilt."""
+    if len(sequence) == 0:
+        return sequence
+    angle = np.radians(np.random.uniform(-max_angle, max_angle))
+    cos_a, sin_a = np.cos(angle), np.sin(angle)
+    rotated = sequence.copy()
+    num_features = rotated.shape[1]
+    # Rotate x/y pairs for all landmarks (every 3 features: x, y, z)
+    for i in range(0, min(num_features, 225), 3):  # 225 = 75 landmarks * 3 coords
+        x = rotated[:, i].copy()
+        y = rotated[:, i + 1].copy()
+        rotated[:, i] = x * cos_a - y * sin_a
+        rotated[:, i + 1] = x * sin_a + y * cos_a
+    return rotated
+
+
+def channel_dropout(sequence: np.ndarray, p: float = 0.15) -> np.ndarray:
+    """Zero-out an entire body-part channel to force learning from partial observations."""
+    if len(sequence) == 0 or sequence.shape[1] < 126:
+        return sequence
+    if np.random.random() > p:
+        return sequence
+    dropped = sequence.copy()
+    # Choose which channel to drop: left hand (0:63), right hand (63:126), or pose (126:225)
+    channels = [(0, 63), (63, 126)]
+    if sequence.shape[1] >= 225:
+        channels.append((126, 225))
+    start, end = channels[np.random.randint(len(channels))]
+    dropped[:, start:end] = 0.0
+    return dropped
+
+
 def swap_hands(sequence: np.ndarray) -> np.ndarray:
     """
     Swap left and right hand landmarks.
@@ -190,7 +233,7 @@ def apply_augmentations(
         Augmented sequence
     """
     if augmentations is None:
-        # Default augmentation pipeline
+        # Default augmentation pipeline (11 techniques for maximum diversity)
         augmentations = [
             mirror_horizontal,
             swap_hands,
@@ -200,6 +243,9 @@ def apply_augmentations(
             lambda seq: random_frame_dropout(seq, drop_ratio=0.1),
             lambda seq: temporal_cutout(seq, max_ratio=0.2),
             lambda seq: temporal_crop(seq, min_ratio=0.7),
+            lambda seq: scale_variation(seq, min_scale=0.85, max_scale=1.15),
+            lambda seq: rotation_2d(seq, max_angle=10.0),
+            lambda seq: channel_dropout(seq, p=0.15),
         ]
 
     augmented = sequence.copy()
