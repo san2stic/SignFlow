@@ -19,7 +19,7 @@ export function useMediaPipe({
   enabled,
   targetFps = 30, // Increased from 12 to 30 for smoother sign language capture
   includeFace = false,
-  modelComplexity = 2, // Use highest quality model by default for best accuracy
+  modelComplexity = 1, // Fix: abaissé de 2 → 1 (~30-40 ms/frame vs ~60-80 ms)
   minDetectionConfidence = 0.7,
   minTrackingConfidence = 0.7
 }: UseMediaPipeOptions): { frame: LandmarkFrame | null; ready: boolean } {
@@ -50,10 +50,10 @@ export function useMediaPipe({
     });
 
     holistic.setOptions({
-      modelComplexity: modelComplexity, // Use configurable model complexity (default: 2 = highest)
+      modelComplexity: modelComplexity, // Fix: défaut 1 (full) au lieu de 2 (heavy)
       smoothLandmarks: true, // Keep landmark smoothing for temporal consistency
       enableSegmentation: false, // Not needed for sign language
-      refineFaceLandmarks: true, // Enable for better facial expression detection
+      refineFaceLandmarks: false, // Fix: false → évite ~10-15 ms de surcoût inutile
       minDetectionConfidence, // Configurable by context (training can be more permissive)
       minTrackingConfidence // Configurable by context (training can be more permissive)
     });

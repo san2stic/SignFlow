@@ -28,6 +28,10 @@ vi.mock("../../hooks/useMediaPipe", () => ({
   useMediaPipe: () => ({ frame: null, ready: true })
 }));
 
+vi.mock("../../hooks/useMediaPipeOptimized", () => ({
+  useMediaPipeOptimized: () => ({ frame: null, ready: true, metrics: { fps: 0, processingTime: 0, cacheHitRate: 0, droppedFrames: 0, currentModelComplexity: 1 } })
+}));
+
 vi.mock("../../hooks/useCamera", () => ({
   useCamera: () => ({
     videoRef: { current: null },

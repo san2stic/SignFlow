@@ -5,6 +5,13 @@ interface BufferedChunk {
   timestamp: number;
 }
 
+interface UseCameraOptions {
+  /** Largeur du canvas pré-alloué pour l'inférence (défaut : 640) */
+  inferenceWidth?: number;
+  /** Hauteur du canvas pré-alloué pour l'inférence (défaut : 480) */
+  inferenceHeight?: number;
+}
+
 interface ZoomCapability {
   min: number;
   max: number;
@@ -135,7 +142,7 @@ async function applyWidestAvailableZoom(stream: MediaStream): Promise<void> {
   }
 }
 
-export function useCamera() {
+export function useCamera({ inferenceWidth = 640, inferenceHeight = 480 }: UseCameraOptions = {}) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const [facingMode, setFacingMode] = useState<"user" | "environment">("user");
   const [isReady, setIsReady] = useState(false);
@@ -144,6 +151,26 @@ export function useCamera() {
   const streamRef = useRef<MediaStream | null>(null);
   const preRollRecorderRef = useRef<MediaRecorder | null>(null);
   const preRollChunksRef = useRef<BufferedChunk[]>([]);
+
+  /**
+   * Canvas pré-alloué pour l'inférence (640×480 par défaut).
+   * Évite les allocations GC dans la boucle de traitement des frames.
+   */
+  const inferenceCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const inferenceCtxRef = useRef<CanvasRenderingContext2D | null>(null);
+
+  /** Initialise (ou réutilise) le canvas d'inférence pré-alloué */
+  const getInferenceCanvas = useCallback((): { canvas: HTMLCanvasElement; ctx: CanvasRenderingContext2D } | null => {
+    if (!inferenceCanvasRef.current) {
+      const canvas = document.createElement("canvas");
+      canvas.width = inferenceWidth;
+      canvas.height = inferenceHeight;
+      inferenceCanvasRef.current = canvas;
+      inferenceCtxRef.current = canvas.getContext("2d");
+    }
+    if (!inferenceCtxRef.current) return null;
+    return { canvas: inferenceCanvasRef.current, ctx: inferenceCtxRef.current };
+  }, [inferenceWidth, inferenceHeight]);
 
   const attachVideoRef = useCallback((node: HTMLVideoElement | null): void => {
     videoRef.current = node;
@@ -264,5 +291,28 @@ export function useCamera() {
     return new Blob(recentChunks, { type: mimeType });
   };
 
-  return { videoRef, attachVideoRef, isReady, error, facingMode, toggleFacing, capturePreRollClip };
+  /**
+   * Dessine la frame courante du flux caméra dans le canvas pré-alloué
+   * (inferenceWidth × inferenceHeight, défaut 640×480) et retourne l'ImageData.
+   *
+   * Usage recommandé : passer cette ImageData au Worker MediaPipe au lieu des
+   * 1.2 Mpx du flux HD, ce qui réduit la charge de transfert vers le Worker.
+   *
+   * @returns ImageData redimensionnée, ou null si la vidéo n'est pas prête.
+   */
+  const captureInferenceFrame = useCallback((): ImageData | null => {
+    const video = videoRef.current;
+    if (!video || video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) {
+      return null;
+    }
+
+    const result = getInferenceCanvas();
+    if (!result) return null;
+
+    const { canvas, ctx } = result;
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+    return ctx.getImageData(0, 0, canvas.width, canvas.height);
+  }, [getInferenceCanvas]);
+
+  return { videoRef, attachVideoRef, isReady, error, facingMode, toggleFacing, capturePreRollClip, captureInferenceFrame };
 }
