@@ -53,7 +53,7 @@ self.onmessage = async (event: MessageEvent) => {
       } catch (error) {
         self.postMessage({
           type: "error",
-          error: error instanceof Error ? error.message : "Unknown error"
+          data: { error: error instanceof Error ? error.message : String(error) }
         });
       } finally {
         isProcessing = false;
@@ -75,6 +75,19 @@ self.onmessage = async (event: MessageEvent) => {
       self.postMessage({ type: "closed" });
       break;
   }
+};
+
+// Capturer les erreurs non-catchées du Worker (ex. crash d'import, erreur synchrone)
+// sans ce handler, ces erreurs restent silencieuses côté hook et produisent "undefined".
+self.onerror = (event: string | Event) => {
+  const message =
+    typeof event === "string"
+      ? event
+      : (event as ErrorEvent).message ?? "Worker uncaught error (no message)";
+  self.postMessage({
+    type: "error",
+    data: { error: message }
+  });
 };
 
 async function initHolistic(config: WorkerConfig): Promise<void> {

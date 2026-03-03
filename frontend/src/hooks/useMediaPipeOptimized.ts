@@ -242,6 +242,17 @@ export function useMediaPipeOptimized({
           { type: "module" }
         );
 
+        // Capturer les erreurs non-catchées du Worker (crash d'import, erreur synchrone)
+        // sans ce handler, l'ErrorEvent reste silencieux et produit "undefined" en console.
+        workerRef.current.onerror = (event: ErrorEvent) => {
+          console.error(
+            "MediaPipe worker uncaught error:",
+            event.message ?? event
+          );
+          // Empêcher la propagation vers window.onerror
+          event.preventDefault();
+        };
+
         workerRef.current.onmessage = (event: MessageEvent) => {
           // Guard : event.data peut ne pas être un objet structuré { type, data }
           // (ex. message système du Worker ou payload inattendu) → ne pas crasher.
@@ -375,7 +386,8 @@ export function useMediaPipeOptimized({
         if (useWorker && workerRef.current) {
           // Fix: réutiliser le canvas pré-alloué au lieu d'en créer un nouveau à chaque tick
           const canvas = getInferenceCanvas(video.videoWidth || 640, video.videoHeight || 480);
-          const ctx = canvas.getContext("2d");
+          // willReadFrequently: true — optimise les appels successifs à getImageData
+          const ctx = canvas.getContext("2d", { willReadFrequently: true });
 
           if (ctx) {
             ctx.drawImage(video, 0, 0);
