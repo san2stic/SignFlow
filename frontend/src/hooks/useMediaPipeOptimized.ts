@@ -243,7 +243,11 @@ export function useMediaPipeOptimized({
         );
 
         workerRef.current.onmessage = (event: MessageEvent) => {
-          const { type, data } = event.data;
+          // Guard : event.data peut ne pas être un objet structuré { type, data }
+          // (ex. message système du Worker ou payload inattendu) → ne pas crasher.
+          if (!event.data || typeof event.data !== "object") return;
+          const { type, data } = event.data as { type: string; data: unknown };
+          if (!type) return;
 
           switch (type) {
             case "ready":
@@ -261,7 +265,8 @@ export function useMediaPipeOptimized({
 
               frameIndex.current += 1;
               // Fix: utiliser la ref pour includeFace → pas de closure stale
-              const newFrame = frameFromHolisticResult(data, frameIndex.current, includeFaceRef.current);
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              const newFrame = frameFromHolisticResult(data as any, frameIndex.current, includeFaceRef.current);
 
               // Multi-stage detection feedback — via refs pour éviter les deps cycliques
               if (adaptiveQualityRef.current && detectorRef.current) {
@@ -317,7 +322,7 @@ export function useMediaPipeOptimized({
               break;
 
             case "error":
-              console.error("MediaPipe worker error:", data.error);
+              console.error("MediaPipe worker error:", (data as { error?: unknown })?.error);
               processing = false;
               break;
           }
