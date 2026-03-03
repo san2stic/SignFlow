@@ -35,7 +35,7 @@ class TrainingConfig:
     """Configuration for training."""
 
     num_epochs: int = 80
-    learning_rate: float = 3e-4
+    learning_rate: float = 2e-4
     batch_size: int = 32
     num_workers: int = 2
     device: str = "cpu"  # "cpu" or "cuda" or "mps"
