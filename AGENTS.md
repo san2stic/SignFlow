@@ -32,6 +32,7 @@ Active routes mounted in `frontend/src/routes.tsx` (V2 — Phase 0+):
 - `/studio` -> `frontend/src/pages/StudioPage.tsx` (annotation session list)
 - `/studio/sessions/:id` -> `frontend/src/pages/StudioSessionPage.tsx`
 - `/studio/videos/:id/annotate` -> `frontend/src/pages/VideoAnnotationPage.tsx`
+- `/updater` -> `frontend/src/pages/UpdaterPage.tsx` (auto-update dashboard Git→Docker)
 
 Navigation routing is consistent: all internal links use `/training` (not `/train`).
 
@@ -47,9 +48,12 @@ Top-level:
 
 Backend main modules:
 - `backend/app/api/` REST + WebSocket endpoints.
+  - `backend/app/api/updater.py` — REST + WebSocket endpoints for the auto-update system.
 - `backend/app/models/` SQLAlchemy models.
+  - `backend/app/models/deployment.py` — `DeploymentHistory` model for tracking Git→Docker deployments.
 - `backend/app/schemas/` Pydantic schemas.
 - `backend/app/services/` domain services.
+  - `backend/app/services/updater_service.py` — `UpdaterService` singleton: Git polling, Docker build/deploy pipeline, rollback, WebSocket broadcast.
 - `backend/app/ml/` training/inference/augmentation/monitoring pipeline.
 - `backend/app/auth/` JWT auth utilities and dependencies.
 - `backend/app/tasks/` Celery tasks.
@@ -347,6 +351,7 @@ Key backend vars:
 - active learning: `ACTIVE_LEARNING_*`
 - MLflow registry: `MLFLOW_*`
 - auth: `JWT_SECRET_KEY`, `JWT_ALGORITHM`, `JWT_ACCESS_TOKEN_EXPIRE_MINUTES`
+- auto-update system: `UPDATER_ENABLED`, `UPDATER_REPO_PATH`, `UPDATER_COMPOSE_FILE`, `UPDATER_POLL_INTERVAL_S`, `UPDATER_GIT_BRANCH`, `UPDATER_COMPOSE_SERVICE`, `UPDATER_HEALTH_CHECK_URL`, `UPDATER_HEALTH_CHECK_RETRIES`, `UPDATER_HEALTH_CHECK_DELAY_S`
 
 Frontend:
 - `VITE_DEV_PROXY_TARGET` for Vite `/api` dev proxy target.

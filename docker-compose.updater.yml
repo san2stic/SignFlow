@@ -1,0 +1,48 @@
+# =============================================================================
+# docker-compose.updater.yml — Override pour activer le service d'auto-update
+# =============================================================================
+#
+# Active le daemon d'auto-update Git→Docker dans le container backend.
+#
+# Usage :
+#   docker compose -f docker-compose.yml -f docker-compose.updater.yml up
+#
+# Ou en combinaison avec le stack serveur :
+#   docker compose \
+#     -f docker-compose.yml \
+#     -f docker-compose.prod.yml \
+#     -f docker-compose.server.yml \
+#     -f docker-compose.updater.yml \
+#     --env-file .env.server \
+#     up -d
+#
+# Prérequis :
+#   - Le dépôt Git doit être accessible depuis l'hôte (remote configuré, SSH key ou HTTPS)
+#   - Le daemon Docker doit être accessible via /var/run/docker.sock
+#   - Le binaire docker doit être présent dans /usr/local/bin/docker
+#
+# SÉCURITÉ:
+#   Le mount du socket Docker (/var/run/docker.sock) donne un accès root effectif
+#   à l'hôte Docker. Pour un environnement de production critique, préférer
+#   l'utilisation de docker-socket-proxy (Tecnativa) pour restreindre les APIs
+#   accessibles depuis le container.
+# =============================================================================
+
+services:
+  backend:
+    volumes:
+      # SÉCURITÉ: Le mount du socket Docker donne accès root effectif au host.
+      # Pour la production, utiliser docker-socket-proxy (Tecnativa) à la place.
+      - /var/run/docker.sock:/var/run/docker.sock
+      - .:/repo:ro                                    # accès en lecture au dépôt git
+      - /usr/local/bin/docker:/usr/local/bin/docker:ro  # binaire docker dans le container
+    environment:
+      UPDATER_ENABLED: "true"
+      UPDATER_REPO_PATH: /repo
+      UPDATER_COMPOSE_FILE: /repo/docker-compose.yml
+      UPDATER_POLL_INTERVAL_S: "60"
+      UPDATER_GIT_BRANCH: main
+      UPDATER_COMPOSE_SERVICE: backend
+      UPDATER_HEALTH_CHECK_URL: http://backend:8000/healthz
+      UPDATER_HEALTH_CHECK_RETRIES: "5"
+      UPDATER_HEALTH_CHECK_DELAY_S: "3"

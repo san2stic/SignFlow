@@ -123,13 +123,19 @@ services:
     networks:
       - signflow_network
 
-  # ── Backend : activation S3 + GPU pour inference Celery ──────────────────
+  # ── Backend : activation S3 + GPU pour inference Celery + auto-update ────
   backend:
     volumes:
       # Remplacer le bind mount ./backend/data:/app/data par des volumes nommés
       # Les vidéos vont dans MinIO, les modèles/exports restent en volume local
       - model_data:/app/data/models
       - export_data:/app/data/exports
+      # SÉCURITÉ: Le mount du socket Docker donne accès root effectif au host.
+      # Pour la production, utiliser docker-socket-proxy (Tecnativa) à la place.
+      # Requis pour UPDATER_ENABLED=true (auto-update Git→Docker).
+      - /var/run/docker.sock:/var/run/docker.sock
+      - .:/repo:ro                                    # accès en lecture au dépôt git
+      - /usr/local/bin/docker:/usr/local/bin/docker:ro  # binaire docker dans le container
     environment:
       # Stockage S3 MinIO
       - USE_S3_STORAGE=true
@@ -144,6 +150,16 @@ services:
       - TORCH_DEVICE=cuda
       # TorchServe activé
       - USE_TORCHSERVE=true
+      # ── Auto-Update System (activé sur le serveur de production) ─────────────
+      - UPDATER_ENABLED=${UPDATER_ENABLED:-true}
+      - UPDATER_REPO_PATH=/repo
+      - UPDATER_COMPOSE_FILE=/repo/docker-compose.yml
+      - UPDATER_POLL_INTERVAL_S=${UPDATER_POLL_INTERVAL_S:-60}
+      - UPDATER_GIT_BRANCH=${UPDATER_GIT_BRANCH:-main}
+      - UPDATER_COMPOSE_SERVICE=${UPDATER_COMPOSE_SERVICE:-backend}
+      - UPDATER_HEALTH_CHECK_URL=${UPDATER_HEALTH_CHECK_URL:-http://backend:8000/healthz}
+      - UPDATER_HEALTH_CHECK_RETRIES=${UPDATER_HEALTH_CHECK_RETRIES:-5}
+      - UPDATER_HEALTH_CHECK_DELAY_S=${UPDATER_HEALTH_CHECK_DELAY_S:-3}
     depends_on:
       minio:
         condition: service_started

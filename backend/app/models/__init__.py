@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from app.models.annotation import AnnotationSession, AnnotationSessionVideo, GrammarAnnotation, VideoAnnotation
+from app.models.deployment import DeploymentHistory
 from app.models.model_version import ModelVersion
 from app.models.sign import Sign, sign_relations
 from app.models.training import TrainingSession
@@ -20,4 +21,5 @@ __all__ = [
     "AnnotationSessionVideo",
     "VideoAnnotation",
     "GrammarAnnotation",
+    "DeploymentHistory",
 ]

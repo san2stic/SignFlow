@@ -143,6 +143,39 @@ def on_startup() -> None:
         logger.warning("failed_to_preload_pipeline", error=str(e))
 
 
+@app.on_event("startup")
+async def on_startup_async() -> None:
+    """Initialise and start the UpdaterService background polling loop."""
+    import app.services.updater_service as _updater_module
+
+    svc = _updater_module.UpdaterService(
+        db_factory=SessionLocal,
+        repo_path=settings.updater_repo_path,
+        compose_file=settings.updater_compose_file,
+        poll_interval_s=settings.updater_poll_interval_s,
+        git_branch=settings.updater_git_branch,
+        compose_service_name=settings.updater_compose_service,
+        health_check_url=settings.updater_health_check_url,
+        health_check_retries=settings.updater_health_check_retries,
+        health_check_delay_s=settings.updater_health_check_delay_s,
+        enabled=settings.updater_enabled,
+    )
+    # Assign to the module-level singleton so the router can access it
+    _updater_module.updater_service = svc
+    await svc.start()
+    logger.info("updater_service_initialised", extra={"enabled": settings.updater_enabled})
+
+
+@app.on_event("shutdown")
+async def on_shutdown_async() -> None:
+    """Stop the UpdaterService polling loop gracefully on shutdown."""
+    from app.services.updater_service import updater_service
+
+    if updater_service is not None:
+        await updater_service.stop()
+        logger.info("updater_service_shutdown")
+
+
 @app.get("/healthz", tags=["health"])
 def healthcheck() -> dict[str, str]:
     """Simple health endpoint for probes."""

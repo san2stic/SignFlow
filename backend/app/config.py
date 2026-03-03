@@ -105,6 +105,19 @@ class Settings(BaseSettings):
     jwt_algorithm: str = "HS256"
     jwt_access_token_expire_minutes: int = Field(default=10080, ge=1, le=525600)  # 7 days default
 
+    # ── Auto-Update System ────────────────────────────────────────────────────
+    # Disabled by default to avoid breaking existing deployments.
+    # Set UPDATER_ENABLED=true in .env to activate the polling loop.
+    updater_enabled: bool = False
+    updater_repo_path: str = "/repo"
+    updater_compose_file: str = "/repo/docker-compose.yml"
+    updater_poll_interval_s: int = Field(default=60, ge=10, le=3600)
+    updater_git_branch: str = "main"
+    updater_compose_service: str = "backend"
+    updater_health_check_url: str = "http://localhost:8000/healthz"
+    updater_health_check_retries: int = Field(default=5, ge=1, le=30)
+    updater_health_check_delay_s: int = Field(default=3, ge=1, le=60)
+
     @model_validator(mode="after")
     def validate_security_settings(self) -> "Settings":
         """Validate auth-related settings before app startup."""

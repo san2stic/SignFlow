@@ -8,6 +8,12 @@ services:
     volumes:
       - ./backend/data:/app/data
       - ./backend/app:/app/app
+      # SÉCURITÉ: Le mount du socket Docker donne accès root effectif au host.
+      # Pour la production, utiliser docker-socket-proxy (Tecnativa) à la place.
+      # Requis uniquement si UPDATER_ENABLED=true.
+      - /var/run/docker.sock:/var/run/docker.sock
+      - .:/repo:ro                                    # accès en lecture au dépôt git
+      - /usr/local/bin/docker:/usr/local/bin/docker:ro  # binaire docker dans le container
     environment:
       - DATABASE_URL=postgresql+psycopg://${POSTGRES_USER:-signflow}:${POSTGRES_PASSWORD:-signflow}@db:5432/${POSTGRES_DB:-signflow}
       - REDIS_URL=redis://:${REDIS_PASSWORD:-signflow-dev}@redis:6379/0
@@ -36,6 +42,16 @@ services:
       - MLFLOW_REGISTRY_ENABLED=false
       - MLFLOW_REGISTRY_MODEL_NAME=signflow-model
       - MLFLOW_REGISTRY_AUTO_PROMOTE_STAGING=true
+      # ── Auto-Update System (UPDATER_ENABLED=false par défaut) ─────────────────
+      - UPDATER_ENABLED=${UPDATER_ENABLED:-false}
+      - UPDATER_REPO_PATH=/repo
+      - UPDATER_COMPOSE_FILE=/repo/docker-compose.yml
+      - UPDATER_POLL_INTERVAL_S=${UPDATER_POLL_INTERVAL_S:-60}
+      - UPDATER_GIT_BRANCH=${UPDATER_GIT_BRANCH:-main}
+      - UPDATER_COMPOSE_SERVICE=${UPDATER_COMPOSE_SERVICE:-backend}
+      - UPDATER_HEALTH_CHECK_URL=${UPDATER_HEALTH_CHECK_URL:-http://backend:8000/healthz}
+      - UPDATER_HEALTH_CHECK_RETRIES=${UPDATER_HEALTH_CHECK_RETRIES:-5}
+      - UPDATER_HEALTH_CHECK_DELAY_S=${UPDATER_HEALTH_CHECK_DELAY_S:-3}
     depends_on:
       - db
       - redis

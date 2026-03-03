@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
-from app.api import auth, dictionary, media, models, search, signs, stats, studio, training, translate, videos
+from app.api import auth, dictionary, media, models, search, signs, stats, studio, training, translate, updater, videos
 
 api_router = APIRouter()
 api_router.include_router(auth.router)
@@ -18,3 +18,4 @@ api_router.include_router(search.router, prefix="/search", tags=["search"])
 api_router.include_router(stats.router, prefix="/stats", tags=["stats"])
 api_router.include_router(videos.router, prefix="/videos", tags=["videos"])
 api_router.include_router(studio.router, prefix="/studio", tags=["studio"])
+api_router.include_router(updater.router, prefix="/updater", tags=["updater"])

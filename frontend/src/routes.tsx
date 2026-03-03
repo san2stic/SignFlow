@@ -45,6 +45,11 @@ const VideoAnnotationPage = lazy(async () => {
   return { default: module.VideoAnnotationPage };
 });
 
+const UpdaterPage = lazy(async () => {
+  const module = await import("./pages/UpdaterPage");
+  return { default: module.UpdaterPage };
+});
+
 function RouteFallback(): JSX.Element {
   return (
     <div className="flex min-h-[35vh] items-center justify-center px-4 text-center text-sm text-slate-400">
@@ -112,6 +117,8 @@ export const router = createBrowserRouter([
         path: "studio/sessions/:sessionId/videos/:videoId/annotate",
         element: withSuspense(<VideoAnnotationPage />),
       },
+      // Updater route
+      { path: "updater", element: withSuspense(<UpdaterPage />) },
       { path: "*", element: <Navigate to="/dashboard" replace /> },
     ],
   },
