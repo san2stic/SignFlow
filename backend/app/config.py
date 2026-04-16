@@ -18,7 +18,7 @@ MIN_JWT_SECRET_LENGTH = 32
 class Settings(BaseSettings):
     """Runtime settings loaded from environment variables."""
 
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", case_sensitive=False)
+    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", case_sensitive=False, extra="ignore")
 
     env: str = "development"
     app_name: str = "SignFlow API"

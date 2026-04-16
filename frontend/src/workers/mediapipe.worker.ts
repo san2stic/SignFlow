@@ -7,7 +7,27 @@
  * - Parallel processing with rendering
  */
 
-// @ts-expect-error -- CJS default export, not proper ESM named exports
+// ── importScripts polyfill for ES-module workers ────────────────────
+// @mediapipe/holistic calls importScripts() at runtime to load solution
+// scripts from CDN.  ES-module workers don't expose importScripts, so we
+// shim it with synchronous XHR + indirect eval (both available in workers).
+if (typeof (self as any).importScripts !== "function") {
+  (self as any).importScripts = (...urls: string[]) => {
+    for (const url of urls) {
+      const xhr = new XMLHttpRequest();
+      xhr.open("GET", url, false); // synchronous – mirrors importScripts semantics
+      xhr.send();
+      if (xhr.status >= 200 && xhr.status < 300) {
+        // indirect eval so it executes in global scope
+        (0, eval)(xhr.responseText);
+      } else {
+        throw new Error(`importScripts failed to load: ${url} (status ${xhr.status})`);
+      }
+    }
+  };
+}
+
+// @ts-ignore -- CJS/ESM interop
 import holisticModule from "@mediapipe/holistic";
 const Holistic = holisticModule.Holistic ?? holisticModule;
 type Results = {
@@ -25,7 +45,8 @@ interface WorkerConfig {
   refineFaceLandmarks: boolean;
 }
 
-let holistic: Holistic | null = null;
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+let holistic: any = null;
 let isProcessing = false;
 
 // Initialize MediaPipe Holistic model

@@ -1,0 +1,20 @@
+# Exclude large datasets and runtime data from Docker build context
+# (provided via volume mounts at runtime)
+data/datasets/
+data/videos/
+data/exports/
+data/models/*.pt
+data/models/mlruns/
+
+# Python artifacts
+__pycache__
+*.pyc
+*.pyo
+.pytest_cache
+*.egg-info
+
+# Dev files
+.venv
+.env
+.git
+*.md

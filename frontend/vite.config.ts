@@ -15,7 +15,7 @@ export default defineConfig({
     }
   },
   worker: {
-    format: "es", // ES modules for better tree-shaking
+    format: "es",
     plugins: () => [react()],
   },
   optimizeDeps: {

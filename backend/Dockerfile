@@ -13,6 +13,9 @@ RUN pip install --no-cache-dir --upgrade pip && pip install --no-cache-dir .
 COPY alembic.ini /app/alembic.ini
 COPY alembic /app/alembic
 COPY data /app/data
+COPY scripts /app/scripts
+
+RUN chmod +x /app/scripts/*.sh 2>/dev/null || true
 
 RUN addgroup --system signflow && \
     adduser --system --ingroup signflow signflow && \

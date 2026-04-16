@@ -1,36 +1,56 @@
-# Python
+# ── Python ──────────────────────────────────────────────
 __pycache__/
 *.py[cod]
 *.so
-.venv/
 *.egg-info/
+.venv/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.coverage
+htmlcov/
+celerybeat-schedule
 
-# Node
+# ── Node / Frontend ────────────────────────────────────
 node_modules/
 frontend/dist/
 *.tsbuildinfo
+.eslintcache
+coverage/
 
-# Local data
+# ── Data & ML artifacts ────────────────────────────────
 *.db
 *.sqlite
 *.sqlite3
+*.npy
+*.onnx
+*.mar
+
 backend/data/models/*.pt
+backend/data/models/mlruns/
+backend/data/datasets/
 backend/data/videos/**
 !backend/data/videos/.gitkeep
 !backend/data/videos/*.dvc
 backend/data/exports/**
+!backend/data/exports/.gitkeep
 
-# Env
+# ── Environment & secrets ──────────────────────────────
 .env
 .env.local
-.DS_Store
-.claude/
-*.log
+.env.*.local
 
-# IDE
+# ── Docker ──────────────────────────────────────────────
+docker-compose.override.yml
+
+# ── IDE & OS ────────────────────────────────────────────
+.DS_Store
 .vscode/
 .idea/
-backend/data/models/mlruns/
+.claude/
+*.swp
+*.swo
+*~
+
+# ── Logs ────────────────────────────────────────────────
+*.log

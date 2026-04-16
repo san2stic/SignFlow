@@ -1,0 +1,55 @@
+# docker-compose.lsfb.yml — LSFB-ISOL auto-pipeline
+# ──────────────────────────────────────────────────────
+# Adds an init container that automatically downloads the LSFB-ISOL dataset,
+# converts landmarks, seeds the database, and fine-tunes the model.
+# The backend waits for the init container to finish before starting.
+#
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.lsfb.yml up --build
+#
+# Override training params via env:
+#   LSFB_EPOCHS=40 LSFB_MAX_SIGNS=100 docker compose -f ... up --build
+# ──────────────────────────────────────────────────────
+
+services:
+  lsfb_init:
+    build: ./backend
+    command: ["bash", "/app/scripts/lsfb_init.sh"]
+    user: root
+    volumes:
+      - ./backend/data:/app/data
+      - ./scripts:/app/scripts/repo:ro
+    environment:
+      - PYTHONPATH=/app
+      - DATABASE_URL=postgresql+psycopg://${POSTGRES_USER:-signflow}:${POSTGRES_PASSWORD:-signflow}@db:5432/${POSTGRES_DB:-signflow}
+      - LSFB_DATA_DIR=/app/data/datasets/lsfb_isol
+      - MODEL_DIR=/app/data/models
+      # ── Training hyperparameters (all overridable) ──
+      - LSFB_MAX_SIGNS=${LSFB_MAX_SIGNS:-}
+      - LSFB_MIN_CLIPS=${LSFB_MIN_CLIPS:-10}
+      - LSFB_EPOCHS=${LSFB_EPOCHS:-80}
+      - LSFB_BATCH_SIZE=${LSFB_BATCH_SIZE:-64}
+      - LSFB_LR=${LSFB_LR:-1e-4}
+      - LSFB_DEVICE=${LSFB_DEVICE:-cpu}
+      - LSFB_CHECKPOINT=${LSFB_CHECKPOINT:-}
+      - LSFB_FREEZE_LAYERS=${LSFB_FREEZE_LAYERS:-2}
+      - LSFB_AUGMENTATIONS=${LSFB_AUGMENTATIONS:-4}
+    depends_on:
+      db:
+        condition: service_started
+    deploy:
+      resources:
+        limits:
+          memory: 8G
+          cpus: '4.0'
+
+  backend:
+    depends_on:
+      lsfb_init:
+        condition: service_completed_successfully
+      db:
+        condition: service_started
+      redis:
+        condition: service_started
+      elasticsearch:
+        condition: service_started
